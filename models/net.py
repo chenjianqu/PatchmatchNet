@@ -2,7 +2,7 @@ from typing import Dict, List, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from .module import ConvBnReLU, depth_regression, construct_prior_depth
+from .module import ConvBnReLU, depth_regression, construct_prior_depth, is_empty
 from .patchmatch import PatchMatch
 
 
@@ -245,7 +245,7 @@ class PatchmatchNet(nn.Module):
             # Need conditional since TorchScript only allows "getattr" access with string literals
             if stage == 3:
                 prior_depth = None
-                if prior_points is not None:
+                if prior_points is not None and not is_empty(prior_points):
                     batch, _, height, width = ref_feature[stage].size()
                     prior_depth = construct_prior_depth(width=width, height=height, K=intrinsics_l_list[0],
                                                         points=prior_points)
@@ -274,6 +274,7 @@ class PatchmatchNet(nn.Module):
                     depth=depth,
                     view_weights=view_weights,
                     K=intrinsics_l_list[0],
+                    mask=mask,
                 )
             elif stage == 1:
                 depths, score, view_weights = self.patchmatch_1(
@@ -286,6 +287,7 @@ class PatchmatchNet(nn.Module):
                     depth=depth,
                     view_weights=view_weights,
                     K=intrinsics_l_list[0],
+                    mask=mask,
                 )
 
             depth_patchmatch[stage] = depths

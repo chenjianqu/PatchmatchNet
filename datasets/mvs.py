@@ -92,7 +92,7 @@ class MVSDataset(Dataset):
         depth_max: float = -1.0
         depth_gt = np.empty(0)
         mask = None  # 道路掩码区域
-        prior_points = None  # 参考帧中的已知特征点
+        prior_points = np.empty(0)  # 参考帧中的已知特征点
 
         for view_index, view_id in enumerate(view_ids):
             img_filename = os.path.join(

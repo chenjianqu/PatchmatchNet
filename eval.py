@@ -348,6 +348,8 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=1, help="evaluation batch size")
 
     # PatchMatchNet module options (only used when not loading from file)
+    #parser.add_argument("--patchmatch_interval_scale", nargs="+", type=float, default=[0.005, 0.0125, 0.025],
+    #                    help="normalized interval in inverse depth range to generate samples in local perturbation")
     parser.add_argument("--patchmatch_interval_scale", nargs="+", type=float, default=[0.005, 0.0125, 0.025],
                         help="normalized interval in inverse depth range to generate samples in local perturbation")
     parser.add_argument("--patchmatch_range", nargs="+", type=int, default=[6, 4, 2],

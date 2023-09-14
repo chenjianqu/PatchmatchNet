@@ -255,36 +255,34 @@ def plane_fit(points):
     sum_XZ = torch.sum(points[:, 0, :] * points[:, 2, :])
     sum_YZ = torch.sum(points[:, 1, :] * points[:, 2, :])
 
-    A = np.array([[sum_X2, sum_XY, sum_X],
-                  [sum_XY, sum_Y2, sum_Y],
-                  [sum_X, sum_Y, N]], dtype=np.float32)
-    A = torch.from_numpy(A)
-
-    B = np.array([[sum_XZ, sum_YZ, sum_Z]], dtype=np.float32)
-    B = torch.from_numpy(B)
-
+    A = torch.Tensor([[sum_X2, sum_XY, sum_X],
+                      [sum_XY, sum_Y2, sum_Y],
+                      [sum_X, sum_Y, N]])
+    B = torch.Tensor([sum_XZ, sum_YZ, sum_Z])
     X = torch.linalg.solve(A, B)
+    paras = torch.tensor([X[0],X[1],-1,X[2]],device=points.device)
+    return paras
 
-    return X
 
-
-
-def solve_intersection(plane_paras,O,dirs):
+def solve_intersection(plane_paras, O, dirs):
     '''
     根据空间平面方程，和空间点O，求从O发射的射线与平面的交点坐标
     Args:
         plane_paras:平面的参数,shape(4)
-        O:空间起点，shape[3]
-        dirs:射线的方向 ,shape[3,N]
+        O:空间起点，shape[B,3]
+        dirs:射线的方向 ,shape[B,3,N]
     Returns: 与平面的交点 [3,N]
     '''
-
-
-
-
-
-
-
-
-
-
+    batch = dirs.shape[0]
+    O = O.view([batch, 3, 1])  # [B,3,1]
+    # 平面法向量
+    normal = plane_paras[:3].view([batch, 3, 1])  # [B,3,1]
+    # 平面上的某一点
+    c = torch.tensor([0, 0, - plane_paras[3] / plane_paras[2]], dtype=torch.float32,
+                     device=dirs.device).reshape([batch, 3, 1])  # [B,3,1]
+    # 计算k
+    temp_1 = torch.matmul(normal.transpose(dim0=1,dim1=2), (c - O))  # [B,1,1]
+    k = temp_1 / torch.matmul(dirs.transpose(dim0=1,dim1=2), normal)  # [B,N,1]
+    # 计算射线和平面的交点
+    intersection = O + k.squeeze(2) * dirs  # [B,3,N]
+    return intersection

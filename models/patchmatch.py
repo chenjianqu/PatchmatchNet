@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .module import ConvBnReLU3D, differentiable_warping, is_empty
+from .module import ConvBnReLU3D, differentiable_warping, is_empty, plane_fit, solve_intersection
 
 
 def ground_plane_init_depth(width, height, K):
@@ -91,12 +91,12 @@ class DepthInitialization(nn.Module):
 
         Args:
             prior_depth:(B,H,W)
-            mask:
+            mask: (B,H,W)
             min_depth: minimum virtual depth, (B, )
             max_depth: maximum virtual depth, (B, )
             height: height of depth map
             width: width of depth map
-            depth_interval_scale: depth interval scale
+            depth_interval_scale: depth interval scale,三个阶段分别为[0.005, 0.0125, 0.025]
             device: device on which to place tensor
             depth: current depth (B, 1, H, W)
             K: current intrinsics(B,3,3)
@@ -106,6 +106,12 @@ class DepthInitialization(nn.Module):
         batch_size = min_depth.size()[0]
         inverse_min_depth = 1.0 / min_depth
         inverse_max_depth = 1.0 / max_depth
+
+        if mask is not None:
+            # 地面区域的mask
+            mask = nn.functional.interpolate(mask.unsqueeze(0), size=[height, width],
+                                             mode='bilinear', align_corners=False).squeeze(0)  # [1,H,W]
+            mask = mask > 0
 
         if is_empty(depth):
             # first iteration of Patchmatch on stage 3, sample in the inverse depth range
@@ -125,16 +131,11 @@ class DepthInitialization(nn.Module):
 
             # 使用地面假设
             if mask is not None:
-                # 地面区域的mask
-                ground_mask = nn.functional.interpolate(mask.unsqueeze(0), size=[height, width],
-                                                       mode='bilinear', align_corners=False).squeeze(0)  # [1,H,W]
-
                 K_np = K.cpu().numpy()[0]
                 depth_ground_np = ground_plane_init_depth(width, height, K_np)
                 depth_ground = torch.from_numpy(depth_ground_np).cuda()  # [H,W]
-                ground_mask = ground_mask > 0
                 depth_mask = depth_ground > 0
-                final_mask = ground_mask & depth_mask  # [B,H,W]
+                final_mask = mask & depth_mask  # [B,H,W]
 
                 depth_sample_prior = torch.rand(size=(batch_size, patchmatch_num_sample, height, width),
                                                 device=device) / 10 + depth_ground  # [B,48,H,W]
@@ -145,10 +146,10 @@ class DepthInitialization(nn.Module):
                 depth_sample = depth_sample.permute(0, 3, 1, 2)  # [B,H,W,48]-> [B,48,H,W]
 
             if prior_depth is not None:
-                depth_mask = prior_depth > 0 #[H,W]
+                depth_mask = prior_depth > 0  # [H,W]
                 depth_mask = depth_mask.unsqueeze(0)
                 depth_prior = torch.rand(size=(batch_size, patchmatch_num_sample, height, width),
-                                                device=device) / 10 + prior_depth  # [B,48,H,W]
+                                         device=device) / 10 + prior_depth  # [B,48,H,W]
                 depth_prior = depth_prior.permute(0, 2, 3, 1)  # [B,H,W,48]
                 depth_sample = depth_sample.permute(0, 2, 3, 1)  # [B,H,W,48]
                 depth_sample[depth_mask] = depth_prior[depth_mask]
@@ -159,39 +160,88 @@ class DepthInitialization(nn.Module):
         elif self.patchmatch_num_sample == 1:
             return depth.detach()
         else:
-            #地面区域，反投影为3D点
-            ground_mask = nn.functional.interpolate(mask.unsqueeze(0), size=[height, width],
-                                                    mode='bilinear', align_corners=False).squeeze(0)  # [1,H,W]
-            ground_mask = ground_mask.view(batch_size,height*width) # [1,H*W]
 
-            y_grid, x_grid = torch.meshgrid(
-                [
-                    torch.arange(0, height, dtype=torch.float32, device=device),
-                    torch.arange(0, width, dtype=torch.float32, device=device),
-                ]
-            )
-            y_grid, x_grid = y_grid.contiguous().view(height * width), x_grid.contiguous().view(height * width)
-            xy = torch.stack((x_grid, y_grid, torch.ones_like(x_grid)))  # [3, H*W]
-            xy = torch.unsqueeze(xy, 0).repeat(batch_size, 1, 1)  # [B, 3, H*W]
-            xyd = xy * depth
-            xyz = torch.matmul(K,xyd)
-            xyz = xyz[ground_mask] # [B, 3, N]
+            K_inv = torch.linalg.inv(K)  # [B,3,3]
 
-            #平面拟合
+            # 是否使用平面拟合
+            use_plane_fit = False
+            if use_plane_fit:
+                grid_size = int(height / 10)  # 用于估计平面的网格大小
+                for start_y in range(0, height - grid_size, grid_size):
+                    for start_x in range(0, width - grid_size, grid_size):
+                        end_y = start_y + grid_size
+                        end_x = start_x + grid_size
+                        mask_roi = mask[:, start_y:end_y, start_x:end_x]  # [B,S,S]
+                        if mask_roi.sum() < 5:
+                            continue
+                        mask_roi = mask_roi.reshape([batch_size, -1])
 
+                        y_grid, x_grid = torch.meshgrid(
+                            [
+                                torch.arange(start_y, end_y, dtype=torch.float32, device=device),
+                                torch.arange(start_x, end_x, dtype=torch.float32, device=device),
+                            ]
+                        )
+                        y_grid, x_grid = y_grid.contiguous().view(grid_size * grid_size), x_grid.contiguous().view(
+                            grid_size * grid_size)
+                        xy = torch.stack((x_grid, y_grid, torch.ones_like(x_grid)))  # [3, S*S]
+                        xy = torch.unsqueeze(xy, 0).repeat(batch_size, 1, 1)  # [B, 3, S*S]
+                        xyd = xy * depth[:, :, start_y:end_y, start_x:end_x].reshape([batch_size, -1])  # [B, 3, S*S]
+                        xyz = torch.matmul(K_inv, xyd)  # [B, 3, S*S]
 
+                        # 平面拟合
+                        xyz_masked = xyz[:, :, mask_roi[0]]  # [B, 3, N]
+                        planes = plane_fit(xyz_masked)  # [4]
 
+                        # 求射线交点
+                        O = torch.zeros([batch_size, 3, 1], dtype=torch.float32, device=device)  # [B,3,1]
+                        dirs = xyz / xyz[:, 2]  # [B,3,N]
+                        points_inter = solve_intersection(planes, O, dirs)  # [B,3,N]
+
+                        # 投影交点，得到新的深度
+                        xyd = torch.matmul(K, points_inter)  # [B,3,N]
+                        d_new = xyd[:, 2]  # [B,N]
+
+                        # 将新的深度应用到输入的深度图中
+                        d = d_new.reshape(batch_size, grid_size, grid_size)  # [B,S,S]
+                        mask_depth = mask_roi.reshape(batch_size, grid_size, grid_size)
+                        (depth[:, :, start_y:end_y, start_x:end_x])[mask_depth.unsqueeze(1)] = d[mask_depth]
+
+            # 是否使用深度平均池化
+            use_depth_avg_pooling = False
+            if use_depth_avg_pooling and mask is not None:
+                pooling_size = 5
+                if width < 100:
+                    pooling_size = 7
+                elif width < 300:
+                    pooling_size = 11
+                elif width < 600:
+                    pooling_size = 21
+                else:
+                    pooling_size = 31
+
+                average_pool = torch.nn.AvgPool2d(pooling_size, stride=1, padding=int((pooling_size - 1) / 2))
+                depth_pooled = average_pool(depth)  # (B, 1, H, W)
+                mask = mask.unsqueeze(1)  # (B, 1, H, W)
+                depth[mask] = depth_pooled[mask]  # (B, 1, H, W)
 
             # other Patchmatch, local perturbation is performed based on previous result
             # uniform samples in an inversed depth range
-            depth_sample = (
+            # shape:[B,48,H,W]，每个像素的深度范围 [-24,24]
+            depth_sample_raw = (
                 torch.arange(-self.patchmatch_num_sample // 2, self.patchmatch_num_sample // 2, 1, device=device)
                 .view(1, self.patchmatch_num_sample, 1, 1).repeat(batch_size, 1, height, width).float()
             )
+            #逆深度的范围*scale, 三个阶段分别为[0.005, 0.0125, 0.025]
             inverse_depth_interval = (inverse_min_depth - inverse_max_depth) * depth_interval_scale
             inverse_depth_interval = inverse_depth_interval.view(batch_size, 1, 1, 1)
 
-            depth_sample = 1.0 / depth.detach() + inverse_depth_interval * depth_sample
+            inv_scale = inverse_depth_interval.view([-1]).item()
+            half_num_sample = self.patchmatch_num_sample // 2
+            print("range:%f - %f "%(1/(-inv_scale* half_num_sample),
+                                    1/( inv_scale* half_num_sample)))
+            #扰动区间  w:212 range:32   w:424 range:132   w=848,range:313
+            depth_sample = 1.0 / depth.detach() + inverse_depth_interval * depth_sample_raw
 
             depth_clamped = []
             del depth
@@ -199,8 +249,18 @@ class DepthInitialization(nn.Module):
                 depth_clamped.append(
                     torch.clamp(depth_sample[k], min=inverse_max_depth[k], max=inverse_min_depth[k]).unsqueeze(0)
                 )
+            depth_result = 1.0 / torch.cat(depth_clamped, dim=0)
 
-            return 1.0 / torch.cat(depth_clamped, dim=0)
+            use_road_area_smooth = False
+            if use_road_area_smooth:
+                depth_sample_road = depth_sample_raw / self.patchmatch_num_sample #(B, Ndepth, H, W)
+                depth_sample_road = depth_sample_road.permute(0, 2, 3, 1)  # [B,H,W,48]
+
+                depth_result = depth_result.permute(0, 2, 3, 1)  # [B,H,W,48]
+                depth_result[mask.squeeze(1)] = depth_sample_road[mask.squeeze(1)]
+                depth_result = depth_result.permute(0, 3, 1, 2)  # [B,H,W,48]-> [B,48,H,W]
+
+            return depth_result
 
 
 class Propagation(nn.Module):
