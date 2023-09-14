@@ -84,11 +84,13 @@ class DepthInitialization(nn.Module):
             device: torch.device,
             depth: torch.Tensor,
             K: torch.Tensor,
-            mask=None
+            mask=None,
+            prior_depth=None,
     ) -> torch.Tensor:
         """Forward function for depth initialization
 
         Args:
+            prior_depth:(B,H,W)
             mask:
             min_depth: minimum virtual depth, (B, )
             max_depth: maximum virtual depth, (B, )
@@ -104,6 +106,7 @@ class DepthInitialization(nn.Module):
         batch_size = min_depth.size()[0]
         inverse_min_depth = 1.0 / min_depth
         inverse_max_depth = 1.0 / max_depth
+
         if is_empty(depth):
             # first iteration of Patchmatch on stage 3, sample in the inverse depth range
             # divide the range into several intervals and sample in each of them
@@ -122,23 +125,33 @@ class DepthInitialization(nn.Module):
 
             # 使用地面假设
             if mask is not None:
-                prior_mask = nn.functional.interpolate(mask.unsqueeze(0), size=[height, width],
+                # 地面区域的mask
+                ground_mask = nn.functional.interpolate(mask.unsqueeze(0), size=[height, width],
                                                        mode='bilinear', align_corners=False).squeeze(0)  # [1,H,W]
 
                 K_np = K.cpu().numpy()[0]
                 depth_ground_np = ground_plane_init_depth(width, height, K_np)
                 depth_ground = torch.from_numpy(depth_ground_np).cuda()  # [H,W]
-                prior_mask = prior_mask > 0
+                ground_mask = ground_mask > 0
                 depth_mask = depth_ground > 0
-                final_mask = prior_mask & depth_mask  # [B,H,W]
+                final_mask = ground_mask & depth_mask  # [B,H,W]
 
                 depth_sample_prior = torch.rand(size=(batch_size, patchmatch_num_sample, height, width),
                                                 device=device) / 10 + depth_ground  # [B,48,H,W]
-
-                depth_sample = depth_sample.permute(0, 2, 3, 1)  # [B,H,W,48]
                 depth_sample_prior = depth_sample_prior.permute(0, 2, 3, 1)  # [B,H,W,48]
 
+                depth_sample = depth_sample.permute(0, 2, 3, 1)  # [B,H,W,48]
                 depth_sample[final_mask] = depth_sample_prior[final_mask]
+                depth_sample = depth_sample.permute(0, 3, 1, 2)  # [B,H,W,48]-> [B,48,H,W]
+
+            if prior_depth is not None:
+                depth_mask = prior_depth > 0 #[H,W]
+                depth_mask = depth_mask.unsqueeze(0)
+                depth_prior = torch.rand(size=(batch_size, patchmatch_num_sample, height, width),
+                                                device=device) / 10 + prior_depth  # [B,48,H,W]
+                depth_prior = depth_prior.permute(0, 2, 3, 1)  # [B,H,W,48]
+                depth_sample = depth_sample.permute(0, 2, 3, 1)  # [B,H,W,48]
+                depth_sample[depth_mask] = depth_prior[depth_mask]
                 depth_sample = depth_sample.permute(0, 3, 1, 2)  # [B,H,W,48]-> [B,48,H,W]
 
             return depth_sample
@@ -146,6 +159,29 @@ class DepthInitialization(nn.Module):
         elif self.patchmatch_num_sample == 1:
             return depth.detach()
         else:
+            #地面区域，反投影为3D点
+            ground_mask = nn.functional.interpolate(mask.unsqueeze(0), size=[height, width],
+                                                    mode='bilinear', align_corners=False).squeeze(0)  # [1,H,W]
+            ground_mask = ground_mask.view(batch_size,height*width) # [1,H*W]
+
+            y_grid, x_grid = torch.meshgrid(
+                [
+                    torch.arange(0, height, dtype=torch.float32, device=device),
+                    torch.arange(0, width, dtype=torch.float32, device=device),
+                ]
+            )
+            y_grid, x_grid = y_grid.contiguous().view(height * width), x_grid.contiguous().view(height * width)
+            xy = torch.stack((x_grid, y_grid, torch.ones_like(x_grid)))  # [3, H*W]
+            xy = torch.unsqueeze(xy, 0).repeat(batch_size, 1, 1)  # [B, 3, H*W]
+            xyd = xy * depth
+            xyz = torch.matmul(K,xyd)
+            xyz = xyz[ground_mask] # [B, 3, N]
+
+            #平面拟合
+
+
+
+
             # other Patchmatch, local perturbation is performed based on previous result
             # uniform samples in an inversed depth range
             depth_sample = (
@@ -519,11 +555,13 @@ class PatchMatch(nn.Module):
             depth: torch.Tensor,
             view_weights: torch.Tensor,
             K: torch.Tensor,
-            mask=None
+            mask=None,
+            prior_depth=None,
     ) -> Tuple[List[torch.Tensor], torch.Tensor, torch.Tensor]:
         """Forward method for PatchMatch
 
         Args:
+            prior_depth:(B,H,W)
             K:
             mask:
             ref_feature: feature from reference view, (B, C, H, W)
@@ -582,7 +620,8 @@ class PatchMatch(nn.Module):
                 device=device,
                 depth=depth_sample,
                 K=K,
-                mask=mask
+                mask=mask,
+                prior_depth=prior_depth,
             )
 
             # adaptive propagation，根据propa_grid定义的邻域，每个像素点额外从邻域中取num_neighbors个深度作为假设深度

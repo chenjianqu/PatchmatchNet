@@ -36,6 +36,7 @@ CUSTOM_TESTING="/media/cjq/新加卷/datasets/220Dataset/22_GND_vslam/20230809_A
 
 python eval.py --input_folder=$CUSTOM_TESTING \
 --mask_folder=${CUSTOM_TESTING}"/road_mask" \
+--colmap_dense_folder=${CUSTOM_TESTING} \
 --output_folder=$CUSTOM_TESTING --checkpoint_path $CHECKPOINT_FILE \
 --num_views 5 --image_max_dim 2048 --geo_mask_thres 3 --geo_depth_thres 0.05 --photo_thres 0.5 \
 --output_type "both" --use_road_mask  "$@"

@@ -15,7 +15,6 @@ from datasets.data_io import read_cam_file, read_image, read_map, read_pair_file
 from datasets.mvs import MVSDataset
 from models.net import PatchmatchNet
 from utils import print_args, tensor2numpy, to_cuda
-import visualize_utils
 from PIL import Image
 
 
@@ -49,7 +48,8 @@ def save_depth(args):
         max_dim=args.image_max_dim,
         scan_list=args.scan_list,
         num_light_idx=args.num_light_idx,
-        mask_folder=args.mask_folder
+        mask_folder=args.mask_folder,
+        colmap_folder=args.colmap_dense_folder
     )
 
     image_loader = DataLoader(
@@ -65,7 +65,8 @@ def save_depth(args):
                 sample_cuda["extrinsics"],
                 sample_cuda["depth_min"],
                 sample_cuda["depth_max"],
-                sample_cuda["mask"]
+                sample_cuda["mask"],
+                sample_cuda["prior_points"]  # [3,N]
             )
             depth = tensor2numpy(depth)
             confidence = tensor2numpy(confidence)
@@ -334,6 +335,8 @@ if __name__ == "__main__":
                         choices=["params", "module"])
     parser.add_argument("--output_type", type=str, default="both", help="Type of outputs to produce",
                         choices=["depth", "fusion", "both"])
+    parser.add_argument("--colmap_dense_folder", type=str, default='', help="input colmap_dense_folder path")
+
 
     # Dataset loading options
     parser.add_argument("--num_views", type=int, default=20,

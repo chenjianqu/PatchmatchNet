@@ -2,7 +2,7 @@ from typing import Dict, List, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from .module import ConvBnReLU, depth_regression
+from .module import ConvBnReLU, depth_regression, construct_prior_depth
 from .patchmatch import PatchMatch
 
 
@@ -181,10 +181,12 @@ class PatchmatchNet(nn.Module):
             depth_min: torch.Tensor,
             depth_max: torch.Tensor,
             mask=None,
+            prior_points=None,
     ) -> Tuple[torch.Tensor, torch.Tensor, Dict[int, List[torch.Tensor]]]:
         """Forward method for PatchMatchNet
 
         Args:
+            prior_points:[3,N]
             mask:
             images: N images (B, 3, H, W) stored in list
             intrinsics: intrinsic 3x3 matrices for all images (B, N, 3, 3)
@@ -242,6 +244,12 @@ class PatchmatchNet(nn.Module):
 
             # Need conditional since TorchScript only allows "getattr" access with string literals
             if stage == 3:
+                prior_depth = None
+                if prior_points is not None:
+                    batch, _, height, width = ref_feature[stage].size()
+                    prior_depth = construct_prior_depth(width=width, height=height, K=intrinsics_l_list[0],
+                                                        points=prior_points)
+
                 depths, score, view_weights = self.patchmatch_3(
                     ref_feature=ref_feature[stage],
                     src_features=src_features_l,
@@ -252,7 +260,8 @@ class PatchmatchNet(nn.Module):
                     depth=depth,
                     view_weights=view_weights,
                     K=intrinsics_l_list[0],  # ref_K
-                    mask=mask
+                    mask=mask,
+                    prior_depth=prior_depth,
                 )
             elif stage == 2:
                 depths, score, view_weights = self.patchmatch_2(

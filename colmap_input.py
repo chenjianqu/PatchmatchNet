@@ -168,6 +168,8 @@ if __name__ == "__main__":
                 f.write("%d %f " % (image_id, s))
             f.write("\n")
 
+    fout = open(os.path.join(args.output_folder, "name_map.txt"), "w")
+
     for i in range(num_images):
         if args.convert_format:
             img = cv2.imread(os.path.join(image_dir, images[i].name))
@@ -184,3 +186,6 @@ if __name__ == "__main__":
         img = img[:1080, :3392]
         img = cv2.resize(img, dsize=(1696,540))
         cv2.imwrite(os.path.join(road_mask_dir, "%08d.jpg" % i), img)
+        fout.write("%i %s\n" % (i,images[i].name))
+
+    fout.close()

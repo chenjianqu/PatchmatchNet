@@ -243,3 +243,66 @@ def quaternion_to_rotation_matrix(qvec: List[float]) -> np.ndarray:
         [2 * qvec[3] * qvec[1] - 2 * qvec[0] * qvec[2],
          2 * qvec[2] * qvec[3] + 2 * qvec[0] * qvec[1],
          1 - 2 * qvec[1] ** 2 - 2 * qvec[2] ** 2]])
+
+
+def read_model_get_points(model_dir):
+    '''
+    读取colmap去畸变的稀疏建图结果
+    Args:
+        model_dir:
+    Returns:所有图像的内参Dict，外参Dict，每个图像Dict关联的3D点
+
+    '''
+    cameras, images, points3d = read_model(model_dir, ".bin")
+    num_images = len(images)
+
+    param_type: Dict[str, List[str]] = {
+        "SIMPLE_PINHOLE": ["f", "cx", "cy"],
+        "PINHOLE": ["fx", "fy", "cx", "cy"],
+        "SIMPLE_RADIAL": ["f", "cx", "cy", "k"],
+        "SIMPLE_RADIAL_FISHEYE": ["f", "cx", "cy", "k"],
+        "RADIAL": ["f", "cx", "cy", "k1", "k2"],
+        "RADIAL_FISHEYE": ["f", "cx", "cy", "k1", "k2"],
+        "OPENCV": ["fx", "fy", "cx", "cy", "k1", "k2", "p1", "p2"],
+        "OPENCV_FISHEYE": ["fx", "fy", "cx", "cy", "k1", "k2", "k3", "k4"],
+        "FULL_OPENCV": ["fx", "fy", "cx", "cy", "k1", "k2", "p1", "p2", "k3", "k4", "k5", "k6"],
+        "FOV": ["fx", "fy", "cx", "cy", "omega"],
+        "THIN_PRISM_FISHEYE": ["fx", "fy", "cx", "cy", "k1", "k2", "p1", "p2", "k3", "k4", "sx1", "sy1"]
+    }
+
+    # intrinsic
+    intrinsic: Dict[int, np.ndarray] = {}
+    for camera_id, cam in cameras.items():
+        params_dict = {key: value for key, value in zip(param_type[cam.model], cam.params)}
+        if "f" in param_type[cam.model]:
+            params_dict["fx"] = params_dict["f"]
+            params_dict["fy"] = params_dict["f"]
+        i = np.array([
+            [params_dict["fx"], 0, params_dict["cx"]],
+            [0, params_dict["fy"], params_dict["cy"]],
+            [0, 0, 1]
+        ])
+        intrinsic[camera_id] = i
+
+    # extrinsic
+    extrinsic: Dict[str,np.ndarray] = {}
+    for i in range(num_images):
+        e = np.zeros((4, 4))
+        e[:3, :3] = quaternion_to_rotation_matrix(images[i].qvec)
+        e[:3, 3] = images[i].tvec
+        e[3, 3] = 1
+        extrinsic[images[i].name] = e
+
+    images_points: Dict[str,List[np.ndarray]] = {}
+    for i in range(num_images):
+        zs = []
+        ex = extrinsic[images[i].name]
+        for p3d_id in images[i].point3d_ids:
+            if p3d_id == -1:
+                continue
+            transformed: np.ndarray = np.matmul(
+                ex, [points3d[p3d_id].xyz[0], points3d[p3d_id].xyz[1], points3d[p3d_id].xyz[2], 1])
+            zs.append(transformed[:3])
+        images_points[images[i].name] = zs
+
+    return intrinsic, extrinsic, images_points
