@@ -163,16 +163,18 @@ def differentiable_warping(
             batch, 1, num_depth, height * width
         )  # [B, 3, Ndepth, H*W]
         proj_xyz = rot_depth_xyz + trans.view(batch, 3, 1, 1)  # [B, 3, Ndepth, H*W]
-        # avoid negative depth
+        # avoid negative depth（由于有些区域视野并不重叠，因此得到的深度可能是负的）
         negative_depth_mask = proj_xyz[:, 2:] <= 1e-3
         proj_xyz[:, 0:1][negative_depth_mask] = float(width)
         proj_xyz[:, 1:2][negative_depth_mask] = float(height)
         proj_xyz[:, 2:3][negative_depth_mask] = 1.0
+        # 得到参考视图的每个深度在源视图下的像素坐标
         grid = proj_xyz[:, :2, :, :] / proj_xyz[:, 2:3, :, :]  # [B, 2, Ndepth, H*W]
         proj_x_normalized = grid[:, 0, :, :] / ((width - 1) / 2) - 1  # [B, Ndepth, H*W]
         proj_y_normalized = grid[:, 1, :, :] / ((height - 1) / 2) - 1
         grid = torch.stack((proj_x_normalized, proj_y_normalized), dim=3)  # [B, Ndepth, H*W, 2]
 
+    # 采样源视图上的特征
     return F.grid_sample(
         src_fea,
         grid.view(batch, num_depth * height, width, 2),
@@ -199,6 +201,53 @@ def depth_regression(p: torch.Tensor, depth_values: torch.Tensor) -> torch.Tenso
 
 def is_empty(x: torch.Tensor) -> bool:
     return x.numel() == 0
+
+
+def ground_plane_init_depth(width, height, K):
+    '''
+    地面深度假设
+    @param width: 图像宽度
+    @param height: 图像高度
+    @param K: 内参矩阵 [3,3]
+    @return: 地面假设的深度 [height,width]
+    '''
+    T_vc = np.array([[1.65671625e-02, -3.32327391e-02, 9.99310319e-01, 2.17537799e+00],
+                     [9.99862347e-01, 3.52411779e-04, 1.65880340e-02, 2.80948292e-02],
+                     [-9.03434534e-04, -9.99447578e-01, -3.32223260e-02, 1.33101139e+00],
+                     [0.00000000e+00, 0.00000000e+00, 0.00000000e+00, 1.00000000e+00]], np.float32)
+    T_cv = np.linalg.inv(T_vc)
+
+    K_inv = np.linalg.inv(K)
+
+    # 生成相机坐标系下的归一化坐标
+    x_cam, y_cam = np.meshgrid(np.arange(0, width), np.arange(0, height))
+    x_cam, y_cam = x_cam.reshape(-1), y_cam.reshape(-1)
+    p_cam_pixel = np.vstack([x_cam, y_cam, np.ones([1, width * height], dtype=np.float32)])  # [3, H*W]
+    p_cam_norm = np.matmul(K_inv, p_cam_pixel)  # [3, H*W]
+    p_cam_norm_h = np.vstack([p_cam_norm, np.ones_like(x_cam)])  # [4, H*W]
+    # 变换到car坐标系
+    p_car_norm = np.matmul(T_vc, p_cam_norm_h)[:3, :]  # [3,H*W]
+
+    # 相机光心
+    O_car_cam = (T_vc[:3, 3]).reshape([3, 1])  # [3,1]
+    # 计算射线的方向向量
+    v_car = p_car_norm - O_car_cam
+    v_car = v_car / np.linalg.norm(v_car, ord=2, axis=0)  # 归一化
+
+    # 平面法向量
+    N_plane = np.array([0, 0, 1], np.float32).reshape([3, 1])
+    # 计算k
+    temp_1 = np.dot(N_plane.transpose(), -O_car_cam)
+    k = temp_1 / np.matmul(v_car.transpose(), N_plane)  # [H*W,1]
+    # 计算射线和平面的交点
+    p_car_inter = O_car_cam + np.squeeze(k, axis=1) * v_car  # [3,H*W]
+    # 将点变换到相机坐标系
+    p_cam_inter = np.matmul(T_cv, np.vstack([p_car_inter, np.ones([1, width * height])]))[:3, :]  # [4,H*W]
+
+    # 获得深度
+    depth = p_cam_inter[2]  # [1,H*W]
+
+    return depth.reshape([height, width]).astype(np.float32)
 
 
 def construct_prior_depth(width, height, K, points):
@@ -260,7 +309,7 @@ def plane_fit(points):
                       [sum_X, sum_Y, N]])
     B = torch.Tensor([sum_XZ, sum_YZ, sum_Z])
     X = torch.linalg.solve(A, B)
-    paras = torch.tensor([X[0],X[1],-1,X[2]],device=points.device)
+    paras = torch.tensor([X[0], X[1], -1, X[2]], device=points.device)
     return paras
 
 
@@ -281,8 +330,8 @@ def solve_intersection(plane_paras, O, dirs):
     c = torch.tensor([0, 0, - plane_paras[3] / plane_paras[2]], dtype=torch.float32,
                      device=dirs.device).reshape([batch, 3, 1])  # [B,3,1]
     # 计算k
-    temp_1 = torch.matmul(normal.transpose(dim0=1,dim1=2), (c - O))  # [B,1,1]
-    k = temp_1 / torch.matmul(dirs.transpose(dim0=1,dim1=2), normal)  # [B,N,1]
+    temp_1 = torch.matmul(normal.transpose(dim0=1, dim1=2), (c - O))  # [B,1,1]
+    k = temp_1 / torch.matmul(dirs.transpose(dim0=1, dim1=2), normal)  # [B,N,1]
     # 计算射线和平面的交点
     intersection = O + k.squeeze(2) * dirs  # [B,3,N]
     return intersection

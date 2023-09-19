@@ -85,6 +85,9 @@ def save_depth(args):
                 os.makedirs(os.path.dirname(confidence_filename), exist_ok=True)
                 # save depth maps
                 save_map(depth_filename, depth_est.squeeze(0))
+
+                cv2.imwrite(depth_filename + "_cv.png", depth_est.squeeze(0))
+
                 # save confidence maps
                 save_map(confidence_filename, photometric_confidence)
 

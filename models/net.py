@@ -187,7 +187,7 @@ class PatchmatchNet(nn.Module):
 
         Args:
             prior_points:[3,N]
-            mask:
+            mask:[B,H,W]
             images: N images (B, 3, H, W) stored in list
             intrinsics: intrinsic 3x3 matrices for all images (B, N, 3, 3)
             extrinsics: extrinsic 4x4 matrices for all images (B, N, 4, 4)
@@ -227,7 +227,7 @@ class PatchmatchNet(nn.Module):
         view_weights = torch.empty(0, device=device)
         depth_patchmatch: Dict[int, List[torch.Tensor]] = {}
 
-        scale = 0.125
+        scale = 0.125  # 从最粗的特征图 1/8,一边上采样，一边优化深度图
         for stage in range(self.stages - 1, 0, -1):  # 3,2,1,0
             src_features_l = [src_fea[stage] for src_fea in src_features]
 
@@ -238,15 +238,22 @@ class PatchmatchNet(nn.Module):
             proj[:, :, :3, :4] = torch.matmul(intrinsics_l, extrinsics[:, :, :3, :4])
             proj_l = torch.unbind(proj, 1)
             ref_proj, src_proj = proj_l[0], proj_l[1:]  # 投影矩阵
-            scale *= 2.0
+            scale *= 2.0  # 系数x2
 
             intrinsics_l_list = torch.unbind(intrinsics_l, 1)
 
+            batch, _, height, width = ref_feature[stage].size()
+
+            # mask缩放
+            mask_inter = nn.functional.interpolate(mask.unsqueeze(0), size=[height, width],
+                                                   mode='bilinear', align_corners=False).squeeze(0)
+            mask_inter = mask_inter > 0
+
             # Need conditional since TorchScript only allows "getattr" access with string literals
-            if stage == 3:
+            if stage == 3:  # 第一个patchmatch块
+                # 根据特征点，构造深度图
                 prior_depth = None
                 if prior_points is not None and not is_empty(prior_points):
-                    batch, _, height, width = ref_feature[stage].size()
                     prior_depth = construct_prior_depth(width=width, height=height, K=intrinsics_l_list[0],
                                                         points=prior_points)
 
@@ -260,7 +267,7 @@ class PatchmatchNet(nn.Module):
                     depth=depth,
                     view_weights=view_weights,
                     K=intrinsics_l_list[0],  # ref_K
-                    mask=mask,
+                    mask=mask_inter,
                     prior_depth=prior_depth,
                 )
             elif stage == 2:
@@ -274,7 +281,7 @@ class PatchmatchNet(nn.Module):
                     depth=depth,
                     view_weights=view_weights,
                     K=intrinsics_l_list[0],
-                    mask=mask,
+                    mask=mask_inter,
                 )
             elif stage == 1:
                 depths, score, view_weights = self.patchmatch_1(
@@ -287,12 +294,19 @@ class PatchmatchNet(nn.Module):
                     depth=depth,
                     view_weights=view_weights,
                     K=intrinsics_l_list[0],
-                    mask=mask,
+                    mask=mask_inter,
                 )
 
+            # depth_samples: list of depth maps from each patchmatch iteration, Niter * (B,1,H,W)
+            # score: evaluted probabilities, (B,Ndepth,H,W)
+            # view_weights: Tensor to store weights of source views, in shape of (B,Nview-1,H,W),
+            # where Nview-1 represents the number of source views
             depth_patchmatch[stage] = depths
             depth = depths[-1].detach()
 
+            depth_debug = depth.cpu().numpy()
+
+            # 每次都进行上采样
             if stage > 1:
                 # upsampling the depth map and pixel-wise view weight for next stage
                 depth = F.interpolate(depth, scale_factor=2.0, mode="nearest")
@@ -302,7 +316,8 @@ class PatchmatchNet(nn.Module):
         del src_features
 
         # step 3. Refinement
-        depth = self.upsample_net(ref_image, depth, depth_min, depth_max)
+        depth = self.upsample_net(ref_image, depth, depth_min, depth_max) #[B,1,544,1696]
+
         if ref_width != orig_width or ref_height != orig_height:
             depth = F.interpolate(depth, size=[orig_height, orig_width], mode='bilinear', align_corners=False)
         depth_patchmatch[0] = [depth]

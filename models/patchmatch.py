@@ -12,54 +12,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .module import ConvBnReLU3D, differentiable_warping, is_empty, plane_fit, solve_intersection
-
-
-def ground_plane_init_depth(width, height, K):
-    '''
-    地面深度假设
-    @param width: 图像宽度
-    @param height: 图像高度
-    @param K: 内参矩阵 [3,3]
-    @return: 地面假设的深度 [height,width]
-    '''
-    T_vc = np.array([[1.65671625e-02, -3.32327391e-02, 9.99310319e-01, 2.17537799e+00],
-                     [9.99862347e-01, 3.52411779e-04, 1.65880340e-02, 2.80948292e-02],
-                     [-9.03434534e-04, -9.99447578e-01, -3.32223260e-02, 1.33101139e+00],
-                     [0.00000000e+00, 0.00000000e+00, 0.00000000e+00, 1.00000000e+00]], np.float32)
-    T_cv = np.linalg.inv(T_vc)
-
-    K_inv = np.linalg.inv(K)
-
-    # 生成相机坐标系下的归一化坐标
-    x_cam, y_cam = np.meshgrid(np.arange(0, width), np.arange(0, height))
-    x_cam, y_cam = x_cam.reshape(-1), y_cam.reshape(-1)
-    p_cam_pixel = np.vstack([x_cam, y_cam, np.ones([1, width * height], dtype=np.float32)])  # [3, H*W]
-    p_cam_norm = np.matmul(K_inv, p_cam_pixel)  # [3, H*W]
-    p_cam_norm_h = np.vstack([p_cam_norm, np.ones_like(x_cam)])  # [4, H*W]
-    # 变换到car坐标系
-    p_car_norm = np.matmul(T_vc, p_cam_norm_h)[:3, :]  # [3,H*W]
-
-    # 相机光心
-    O_car_cam = (T_vc[:3, 3]).reshape([3, 1])  # [3,1]
-    # 计算射线的方向向量
-    v_car = p_car_norm - O_car_cam
-    v_car = v_car / np.linalg.norm(v_car, ord=2, axis=0)  # 归一化
-
-    # 平面法向量
-    N_plane = np.array([0, 0, 1], np.float32).reshape([3, 1])
-    # 计算k
-    temp_1 = np.dot(N_plane.transpose(), -O_car_cam)
-    k = temp_1 / np.matmul(v_car.transpose(), N_plane)  # [H*W,1]
-    # 计算射线和平面的交点
-    p_car_inter = O_car_cam + np.squeeze(k, axis=1) * v_car  # [3,H*W]
-    # 将点变换到相机坐标系
-    p_cam_inter = np.matmul(T_cv, np.vstack([p_car_inter, np.ones([1, width * height])]))[:3, :]  # [4,H*W]
-
-    # 获得深度
-    depth = p_cam_inter[2]  # [1,H*W]
-
-    return depth.reshape([height, width]).astype(np.float32)
+from .module import ConvBnReLU3D, differentiable_warping, is_empty, plane_fit, solve_intersection, \
+    ground_plane_init_depth
 
 
 class DepthInitialization(nn.Module):
@@ -107,11 +61,11 @@ class DepthInitialization(nn.Module):
         inverse_min_depth = 1.0 / min_depth
         inverse_max_depth = 1.0 / max_depth
 
-        if mask is not None:
-            # 地面区域的mask
-            mask = nn.functional.interpolate(mask.unsqueeze(0), size=[height, width],
-                                             mode='bilinear', align_corners=False).squeeze(0)  # [1,H,W]
-            mask = mask > 0
+        # if mask is not None:
+        #     # 地面区域的mask
+        #     mask = nn.functional.interpolate(mask.unsqueeze(0), size=[height, width],
+        #                                      mode='bilinear', align_corners=False).squeeze(0)  # [1,H,W]
+        #     mask = mask > 0
 
         if is_empty(depth):
             # first iteration of Patchmatch on stage 3, sample in the inverse depth range
@@ -208,17 +162,17 @@ class DepthInitialization(nn.Module):
                         (depth[:, :, start_y:end_y, start_x:end_x])[mask_depth.unsqueeze(1)] = d[mask_depth]
 
             # 是否使用深度平均池化
-            use_depth_avg_pooling = False
+            use_depth_avg_pooling = True
             if use_depth_avg_pooling and mask is not None:
                 pooling_size = 5
                 if width < 100:
-                    pooling_size = 7
+                    pooling_size = 1
                 elif width < 300:
-                    pooling_size = 11
+                    pooling_size = 5
                 elif width < 600:
-                    pooling_size = 21
+                    pooling_size = 5
                 else:
-                    pooling_size = 31
+                    pooling_size = 5
 
                 average_pool = torch.nn.AvgPool2d(pooling_size, stride=1, padding=int((pooling_size - 1) / 2))
                 depth_pooled = average_pool(depth)  # (B, 1, H, W)
@@ -227,20 +181,18 @@ class DepthInitialization(nn.Module):
 
             # other Patchmatch, local perturbation is performed based on previous result
             # uniform samples in an inversed depth range
-            # shape:[B,48,H,W]，每个像素的深度范围 [-24,24]
+            # shape:[B,16,H,W]，每个像素的深度范围 [-8,8]
             depth_sample_raw = (
                 torch.arange(-self.patchmatch_num_sample // 2, self.patchmatch_num_sample // 2, 1, device=device)
                 .view(1, self.patchmatch_num_sample, 1, 1).repeat(batch_size, 1, height, width).float()
             )
-            #逆深度的范围*scale, 三个阶段分别为[0.005, 0.0125, 0.025]
+            # 逆深度的范围*scale, 三个阶段分别为[0.005, 0.0125, 0.025]
             inverse_depth_interval = (inverse_min_depth - inverse_max_depth) * depth_interval_scale
             inverse_depth_interval = inverse_depth_interval.view(batch_size, 1, 1, 1)
 
             inv_scale = inverse_depth_interval.view([-1]).item()
             half_num_sample = self.patchmatch_num_sample // 2
-            print("range:%f - %f "%(1/(-inv_scale* half_num_sample),
-                                    1/( inv_scale* half_num_sample)))
-            #扰动区间  w:212 range:32   w:424 range:132   w=848,range:313
+
             depth_sample = 1.0 / depth.detach() + inverse_depth_interval * depth_sample_raw
 
             depth_clamped = []
@@ -249,11 +201,15 @@ class DepthInitialization(nn.Module):
                 depth_clamped.append(
                     torch.clamp(depth_sample[k], min=inverse_max_depth[k], max=inverse_min_depth[k]).unsqueeze(0)
                 )
-            depth_result = 1.0 / torch.cat(depth_clamped, dim=0)
+            depth_result = 1.0 / torch.cat(depth_clamped, dim=0)  # (B, Ndepth, H, W)
+
+            # TODO
+            depth_debug_max = depth_result[:, 0, :, :].cpu().numpy()  # [B,H,W]
+            depth_debug_min = depth_result[:, -1, :, :].cpu().numpy()
 
             use_road_area_smooth = False
             if use_road_area_smooth:
-                depth_sample_road = depth_sample_raw / self.patchmatch_num_sample #(B, Ndepth, H, W)
+                depth_sample_road = depth_sample_raw / self.patchmatch_num_sample  # (B, Ndepth, H, W)
                 depth_sample_road = depth_sample_road.permute(0, 2, 3, 1)  # [B,H,W,48]
 
                 depth_result = depth_result.permute(0, 2, 3, 1)  # [B,H,W,48]
@@ -285,12 +241,13 @@ class Propagation(nn.Module):
         num_neighbors = grid.size()[1] // height
         # 根据grid定义的领域，额外采样num_neighbors个深度
         propagate_depth_sample = F.grid_sample(
-            depth_sample[:, num_depth // 2, :, :].unsqueeze(1),
+            depth_sample[:, num_depth // 2, :, :].unsqueeze(1),  # 以深度假设中最中间的深度，作为该像素的深度
             grid,
             mode="bilinear",
             padding_mode="border",
             align_corners=False
         ).view(batch, num_neighbors, height, width)
+        # 将邻居的深度和原来的深度拼在一起，并排序
         return torch.sort(torch.cat((depth_sample, propagate_depth_sample), dim=1), dim=1)[0]
 
 
@@ -348,7 +305,6 @@ class Evaluation(nn.Module):
         """
         batch, feature_channel, height, width = ref_feature.size()
         device = ref_feature.device
-
         num_depth = depth_sample.size()[1]
         assert (
                 len(src_features) == len(src_projs)
@@ -360,41 +316,44 @@ class Evaluation(nn.Module):
 
         # Change to a tensor with value 1e-5
         pixel_wise_weight_sum = 1e-5 * torch.ones((batch, 1, 1, height, width), dtype=torch.float32, device=device)
+        # [B,G,F,1,H,W]
         ref_feature = ref_feature.view(batch, self.G, feature_channel // self.G, 1, height, width)
+        # [B,G,D,H,W]
         similarity_sum = torch.zeros((batch, self.G, num_depth, height, width), dtype=torch.float32, device=device)
 
         i = 0
         view_weights_list = []
         for src_feature, src_proj in zip(src_features, src_projs):
-            # 单应变换
+            # [B,G,F,D,H,W] 单应变换,将源视图特征投影到参考视图的前平行平面上
             warped_feature = differentiable_warping(
                 src_feature, src_proj, ref_proj, depth_sample
             ).view(batch, self.G, feature_channel // self.G, num_depth, height, width)
-            # 匹配代价计算，group-wise correlation
+
+            # 匹配代价计算，group-wise correlation, [B,G,D,H,W]，根据论文上的公式(3)计算
             similarity = (warped_feature * ref_feature).mean(2)
             # pixel-wise view weight
-            if is_empty(view_weights):
-                view_weight = self.pixel_wise_net(similarity)
+            if is_empty(view_weights):  # 每个分辨率仅计算一次权重
+                # 根据匹配代价，预测一个权重（里面有一个max操作）
+                view_weight = self.pixel_wise_net(similarity)  # [B,1,H,W]
                 view_weights_list.append(view_weight)
             else:
                 # reuse the pixel-wise view weight from first iteration of Patchmatch on stage 3
                 view_weight = view_weights[:, i].unsqueeze(1)  # [B,1,H,W]
                 i = i + 1
 
-            similarity_sum += similarity * view_weight.unsqueeze(1)
-            pixel_wise_weight_sum += view_weight.unsqueeze(1)
+            similarity_sum += similarity * view_weight.unsqueeze(1)  # [B,G,D,H,W]
+            pixel_wise_weight_sum += view_weight.unsqueeze(1)  # [B,1,1,H,W]
 
         # aggregated matching cost across all the source views
-        # 自适应代价聚合
         similarity = similarity_sum.div_(pixel_wise_weight_sum)  # [B, G, Ndepth, H, W]
-        # adaptive spatial cost aggregation
-        score = self.similarity_net(similarity, grid, weight)  # [B, G, Ndepth, H, W]
+        # 自适应代价聚合,adaptive spatial cost aggregation。通过一个小网络，将每一组的代价投影成一个值
+        score = self.similarity_net(similarity, grid, weight)  # [B,Ndepth, H, W]
 
         # apply softmax to get probability，计算概率
-        score = torch.exp(self.softmax(score))
+        score = torch.exp(self.softmax(score))  # [B,Ndepth, H, W]
 
         if is_empty(view_weights):
-            view_weights = torch.cat(view_weights_list, dim=1)  # [B,4,H,W], 4 is the number of source views
+            view_weights = torch.cat(view_weights_list, dim=1)  # [B,Nsrc,H,W], Nsrc is the number of source views
 
         if is_inverse:
             # depth regression: inverse depth regression
@@ -407,7 +366,7 @@ class Evaluation(nn.Module):
             depth_sample = 1.0 / depth_sample
         else:
             # depth regression: expectation
-            depth_sample = torch.sum(depth_sample * score, dim=1)
+            depth_sample = torch.sum(depth_sample * score, dim=1)  # [B,H,W]
 
         return depth_sample, score, view_weights.detach()
 
@@ -490,26 +449,34 @@ class PatchMatch(nn.Module):
         nn.init.constant_(self.eval_conv.bias, 0.0)
         self.feature_weight_net = FeatureWeightNet(self.evaluate_neighbors, self.G)
 
-    def get_grid(
-            self, grid_type: int, batch: int, height: int, width: int, offset: torch.Tensor, device: torch.device
-    ) -> torch.Tensor:
+    def get_grid(self, grid_type: int,
+                 batch: int, height: int, width: int,
+                 offset: torch.Tensor,
+                 device: torch.device,
+                 mask: torch.Tensor = None
+                 ) -> torch.Tensor:
         """Compute the offset for adaptive propagation or spatial cost aggregation in adaptive evaluation
 
         Args:
+            mask:[B,H,W]
             grid_type: type of grid - propagation (1) or evaluation (2)
             batch: batch size
             height: grid height
             width: grid width
             offset: grid offset
             device: device on which to place tensor
-
         Returns:
             generated grid: in the shape of [batch, propagate_neighbors*H, W, 2]
         """
 
         if grid_type == self.grid_type["propagation"]:
+            # 设置初始邻居的偏移
             if self.propagate_neighbors == 4:  # if 4 neighbors to be sampled in propagation
-                original_offset = [[-self.dilation, 0], [0, -self.dilation], [0, self.dilation], [self.dilation, 0]]
+                original_offset = [
+                    [-self.dilation, 0],
+                    [0, -self.dilation],
+                    [0, self.dilation],
+                    [self.dilation, 0]]
             elif self.propagate_neighbors == 8:  # if 8 neighbors to be sampled in propagation
                 original_offset = [
                     [-self.dilation, -self.dilation],
@@ -583,19 +550,37 @@ class PatchMatch(nn.Module):
             xy = torch.stack((x_grid, y_grid))  # [2, H*W]
             xy = torch.unsqueeze(xy, 0).repeat(batch, 1, 1)  # [B, 2, H*W]
 
+        xy_raw = xy  # [B, 2, H*W]
+
         xy_list = []
-        for i in range(len(original_offset)):
+        num_offset = len(original_offset)
+        for i in range(num_offset):
+            # 最终的邻居偏移 = 初始偏移 + 预测偏移
             original_offset_y, original_offset_x = original_offset[i]
             offset_x = original_offset_x + offset[:, 2 * i, :].unsqueeze(1)
             offset_y = original_offset_y + offset[:, 2 * i + 1, :].unsqueeze(1)
+            # 得到最终每个点的邻居点坐标
             xy_list.append((xy + torch.cat((offset_x, offset_y), dim=1)).unsqueeze(2))
 
         xy = torch.cat(xy_list, dim=2)  # [B, 2, 9, H*W]
+
+        # TODO
+        if mask is not None:
+            # 在深度传播的时候，mask掉某些采样区域
+            # 将xy变为 [B,2,9*H*W]
+            xy = xy.view([batch, 2, num_offset * height * width])
+            xs = xy[:, 0]
+            ys = xy[:, 1]
+            mask_value = mask[:, ys, xs]  # [B,9*H*W]
+
+            xy_raw_repeat = xy_raw.repeat(1, 1, num_offset)  # [B,2,9*H*W]
+            xy[mask_value] = xy_raw_repeat[mask_value]
 
         del xy_list
         del x_grid
         del y_grid
 
+        # 归一化到(-1,1),用于网格采样
         x_normalized = xy[:, 0, :, :] / ((width - 1) / 2) - 1
         y_normalized = xy[:, 1, :, :] / ((height - 1) / 2) - 1
         del xy
@@ -650,16 +635,18 @@ class PatchMatch(nn.Module):
         propa_grid = torch.empty(0, device=device)
         if self.propagate_neighbors > 0 and not (self.stage == 1 and self.patchmatch_iteration == 1):
             # last iteration on stage 1 does not have propagation (photometric consistency filtering)
+            # [B,2*Neighbors,H*W],根据输入的参考特征，预测传播邻居的偏移量
             propa_offset = self.propa_conv(ref_feature).view(batch, 2 * self.propagate_neighbors, height * width)
-            propa_grid = self.get_grid(self.grid_type["propagation"], batch, height, width, propa_offset,
-                                       device)  # [B,len(original_offset) * H, W, 2]
+            # [B,len(original_offset) * H, W, 2],根据偏移量，预测采样网格
+            propa_grid = self.get_grid(self.grid_type["propagation"], batch, height, width, propa_offset, device)
 
         # the learned additional 2D offsets for adaptive spatial cost aggregation (adaptive evaluation)
         eval_offset = self.eval_conv(ref_feature).view(batch, 2 * self.evaluate_neighbors, height * width)
+        # [B, len(original_offset) * H, W, 2)
         eval_grid = self.get_grid(self.grid_type["evaluation"], batch, height, width, eval_offset,
                                   device)  # [B,612,W,2]
 
-        # [B, evaluate_neighbors, H, W]
+        # [B, eval_neighbors, H, W]
         feature_weight = self.feature_weight_net(ref_feature.detach(), eval_grid)
         depth_sample = depth
         del depth
@@ -670,7 +657,8 @@ class PatchMatch(nn.Module):
             is_inverse = self.stage == 1 and iter == self.patchmatch_iteration
 
             # first iteration on stage 3, random initialization (depth is empty), no adaptive propagation
-            # subsequent iterations, local perturbation based on previous result, [B,Ndepth,H,W]
+            # subsequent iterations, local perturbation based on previous result,
+            # [B,Ndepth,H,W]
             depth_sample = self.depth_initialization(
                 min_depth=depth_min,
                 max_depth=depth_max,
@@ -687,10 +675,12 @@ class PatchMatch(nn.Module):
             # adaptive propagation，根据propa_grid定义的邻域，每个像素点额外从邻域中取num_neighbors个深度作为假设深度
             if self.propagate_neighbors > 0 and not (self.stage == 1 and iter == self.patchmatch_iteration):
                 # last iteration on stage 1 does not have propagation (photometric consistency filtering)
-                depth_sample = self.propagation(depth_sample=depth_sample,
-                                                grid=propa_grid)  # [B,num_depth+num_neighbors,H,W]
+                # 执行深度传播，[B,num_depth+num_neighbors,H,W]
+                depth_sample = self.propagation(depth_sample=depth_sample, grid=propa_grid)
 
-            # weights for adaptive spatial cost aggregation in adaptive evaluation, [B,Ndepth,N_neighbors_eval,H,W]
+            # feature_weight: [B, eval_neighbors, H, W]
+            # eval_grid: [B, len(original_offset) * H, W, 2)
+            # [B,Ndepth,eval_neighbors,H,W]， weights for adaptive spatial cost aggregation in adaptive evaluation,
             weight = depth_weight(
                 depth_sample=depth_sample.detach(),
                 depth_min=depth_min,
@@ -703,6 +693,7 @@ class PatchMatch(nn.Module):
 
             # evaluation, outputs regressed depth map and pixel-wise view weights which will
             # be used for subsequent iterations
+            # depth_sample:[B,H,W] score:[B,64,H,W], view_weights:[B,10,H,W]
             depth_sample, score, view_weights = self.evaluation(
                 ref_feature=ref_feature,
                 src_features=src_features,
@@ -714,8 +705,8 @@ class PatchMatch(nn.Module):
                 view_weights=view_weights,
                 is_inverse=is_inverse,
             )
-            # depth_sample:[B,H,W] score:[B,64,H,W], view_weights:[B,10,H,W]
-            depth_sample = depth_sample.unsqueeze(1)
+            depth_sample = depth_sample.unsqueeze(1)  # [B,1,H,W]
+            depth_sample_debug = depth_sample.cpu().numpy()
             depth_samples.append(depth_sample)
 
         return depth_samples, score, view_weights

@@ -31,23 +31,27 @@ CUSTOM_TESTING="/media/cjq/新加卷/datasets/220Dataset/22_GND_vslam/20230809_A
 
 # test on your custom dataset
 #python eval.py --input_folder=$CUSTOM_TESTING --output_folder=$CUSTOM_TESTING --checkpoint_path $CHECKPOINT_FILE \
-#--num_views 10 --image_max_dim 2048 --geo_mask_thres 3 --geo_depth_thres 0.05 --photo_thres 0.5 "$@"
+#--num_views 10 --image_max_dim 2048 --geo_mask_thres 3 --geo_depth_thres 0.05 --photo_thres 0.5 --crop_height 68 "$@"
 
 
 python eval.py --input_folder=$CUSTOM_TESTING \
 --mask_folder=${CUSTOM_TESTING}"/road_mask" \
 --colmap_dense_folder=${CUSTOM_TESTING} \
---output_folder=$CUSTOM_TESTING --checkpoint_path $CHECKPOINT_FILE \
---num_views 5 --image_max_dim 2048 --geo_mask_thres 3 --geo_depth_thres 0.05 --photo_thres 0.5 \
---output_type "both" --use_road_mask  "$@"
+--output_folder=$CUSTOM_TESTING \
+--checkpoint_path $CHECKPOINT_FILE \
+--num_views 5 \
+--image_max_dim 2048 \
+--geo_mask_thres 3 \
+--geo_depth_thres 0.1 \
+--photo_thres 0.5 \
+--output_type "both" \
+--use_road_mask  "$@"
 
 #python eval.py --input_folder=$CUSTOM_TESTING \
 #--mask_folder=${CUSTOM_TESTING}"/road_mask" \
 #--output_folder=$CUSTOM_TESTING --checkpoint_path $CHECKPOINT_FILE \
 #--num_views 5 --image_max_dim 2048 --geo_mask_thres 3 --geo_depth_thres 0.05 --photo_thres 0.5 \
 #--output_type "both" --use_road_mask  "$@"
-
-
 
 
 #python eval.py --input_folder="/media/cjq/新加卷/datasets/220Dataset/22_GND_vslam/20230809_A12/20230805151650.846/dense/" \

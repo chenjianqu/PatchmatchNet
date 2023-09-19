@@ -142,6 +142,12 @@ for i in range(0, width * height, 1000):
 
 # 获得深度
 depth = p_cam_inter[2]  # [1,H*W]
+print(depth.shape)
+depth = depth.reshape([height,width])
+
+print(depth.max())
+print(depth.min())
+print(depth[depth>0].min())
 
 print(depth)
 
