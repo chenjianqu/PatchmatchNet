@@ -245,9 +245,11 @@ class PatchmatchNet(nn.Module):
             batch, _, height, width = ref_feature[stage].size()
 
             # mask缩放
-            mask_inter = nn.functional.interpolate(mask.unsqueeze(0), size=[height, width],
+            mask_resize = None
+            if mask is not None:
+                mask_resize = nn.functional.interpolate(mask.unsqueeze(0), size=[height, width],
                                                    mode='bilinear', align_corners=False).squeeze(0)
-            mask_inter = mask_inter > 0
+                mask_resize = mask_resize > 0
 
             # Need conditional since TorchScript only allows "getattr" access with string literals
             if stage == 3:  # 第一个patchmatch块
@@ -267,7 +269,7 @@ class PatchmatchNet(nn.Module):
                     depth=depth,
                     view_weights=view_weights,
                     K=intrinsics_l_list[0],  # ref_K
-                    mask=mask_inter,
+                    mask=mask_resize,
                     prior_depth=prior_depth,
                 )
             elif stage == 2:
@@ -281,7 +283,7 @@ class PatchmatchNet(nn.Module):
                     depth=depth,
                     view_weights=view_weights,
                     K=intrinsics_l_list[0],
-                    mask=mask_inter,
+                    mask=mask_resize,
                 )
             elif stage == 1:
                 depths, score, view_weights = self.patchmatch_1(
@@ -294,7 +296,7 @@ class PatchmatchNet(nn.Module):
                     depth=depth,
                     view_weights=view_weights,
                     K=intrinsics_l_list[0],
-                    mask=mask_inter,
+                    mask=mask_resize,
                 )
 
             # depth_samples: list of depth maps from each patchmatch iteration, Niter * (B,1,H,W)

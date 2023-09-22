@@ -70,6 +70,18 @@ def read_image_set_mask(filename: str, max_dim: int = -1) -> Tuple[np.ndarray, i
     return scale_to_max_dim(np_image, max_dim)
 
 
+def write_depth_img(filename,depth):
+
+    if not os.path.exists(os.path.dirname(filename)):
+        try:
+            os.makedirs(os.path.dirname(filename))
+        except OSError as exc: # Guard against race condition
+            if exc.errno != errno.EEXIST:
+                raise
+
+    image = Image.fromarray((depth-500)/2).convert("L")
+    image.save(filename)
+    return 1
 
 
 def save_image(filename: str, image: np.ndarray) -> None:

@@ -11,10 +11,11 @@ from plyfile import PlyData, PlyElement
 from typing import Tuple
 from torch.utils.data import DataLoader
 
-from datasets.data_io import read_cam_file, read_image, read_map, read_pair_file, save_image, save_map, write_depth_img
-from datasets.mvs import MVSDataset
+from datasets.data_io import read_cam_file, read_image, read_map, read_pair_file, save_image, save_map
+from datasets.mvs_colmap import ColmapMVSDataset
 from models.net import PatchmatchNet
 from utils import print_args, tensor2numpy, to_cuda
+from PIL import Image
 
 
 def save_depth(args):
@@ -41,12 +42,14 @@ def save_depth(args):
     model.cuda()
     model.eval()
 
-    dataset = MVSDataset(
+    dataset = ColmapMVSDataset(
         data_path=args.input_folder,
         num_views=args.num_views,
         max_dim=args.image_max_dim,
         scan_list=args.scan_list,
-        num_light_idx=args.num_light_idx
+        num_light_idx=args.num_light_idx,
+        mask_folder=args.mask_folder,
+        colmap_folder=args.colmap_dense_folder
     )
 
     image_loader = DataLoader(
@@ -61,7 +64,9 @@ def save_depth(args):
                 sample_cuda["intrinsics"],
                 sample_cuda["extrinsics"],
                 sample_cuda["depth_min"],
-                sample_cuda["depth_max"]
+                sample_cuda["depth_max"],
+                sample_cuda["mask"],
+                sample_cuda["prior_points"]  # [3,N]
             )
             depth = tensor2numpy(depth)
             confidence = tensor2numpy(confidence)
@@ -69,6 +74,8 @@ def save_depth(args):
 
             print("Iter {}/{}, time = {:.3f}".format(batch_idx + 1, len(image_loader), time.time() - start_time))
             filenames = sample["filename"]
+
+            # visualize_utils.visualize_depth(None,depth,sample["intrinsics"][0],confidence)
 
             # save depth maps and confidence maps
             for filename, depth_est, photometric_confidence in zip(filenames, depth, confidence):
@@ -78,6 +85,7 @@ def save_depth(args):
                 os.makedirs(os.path.dirname(confidence_filename), exist_ok=True)
                 # save depth maps
                 save_map(depth_filename, depth_est.squeeze(0))
+
                 cv2.imwrite(depth_filename + "_cv.png", depth_est.squeeze(0))
 
                 # save confidence maps
@@ -86,12 +94,12 @@ def save_depth(args):
 
 # project the reference point cloud into the source view, then project back
 def reproject_with_depth(
-    depth_ref: np.ndarray,
-    intrinsics_ref: np.ndarray,
-    extrinsics_ref: np.ndarray,
-    depth_src: np.ndarray,
-    intrinsics_src: np.ndarray,
-    extrinsics_src: np.ndarray
+        depth_ref: np.ndarray,
+        intrinsics_ref: np.ndarray,
+        extrinsics_ref: np.ndarray,
+        depth_src: np.ndarray,
+        intrinsics_src: np.ndarray,
+        extrinsics_src: np.ndarray
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Project the reference points to the source view, then project back to calculate the reprojection error
 
@@ -114,31 +122,31 @@ def reproject_with_depth(
     # reference view x, y
     x_ref, y_ref = np.meshgrid(np.arange(0, width), np.arange(0, height))
     x_ref, y_ref = x_ref.reshape([-1]), y_ref.reshape([-1])
-    # reference 3D space
+    # 参考相机坐标系3D点
     xyz_ref = np.matmul(np.linalg.inv(intrinsics_ref),
                         np.vstack((x_ref, y_ref, np.ones_like(x_ref))) * depth_ref.reshape([-1]))
-    # source 3D space
+    # 源相机坐标系3D点
     xyz_src = np.matmul(np.matmul(extrinsics_src, np.linalg.inv(extrinsics_ref)),
                         np.vstack((xyz_ref, np.ones_like(x_ref))))[:3]
     # source view x, y
     k_xyz_src = np.matmul(intrinsics_src, xyz_src)
-    xy_src = k_xyz_src[:2] / k_xyz_src[2:3]
+    xy_src = k_xyz_src[:2] / k_xyz_src[2:3]  # 源像素坐标系
 
     # step2. reproject the source view points with source view depth estimation
     # find the depth estimation of the source view
     x_src = xy_src[0].reshape([height, width]).astype(np.float32)
     y_src = xy_src[1].reshape([height, width]).astype(np.float32)
-    sampled_depth_src = cv2.remap(depth_src, x_src, y_src, interpolation=cv2.INTER_LINEAR)
+    sampled_depth_src = cv2.remap(depth_src, x_src, y_src, interpolation=cv2.INTER_LINEAR)  # 采样深度值
 
-    # source 3D space
-    # NOTE that we should use sampled source-view depth_here to project back
+    # source 3D space，NOTE that we should use sampled source-view depth_here to project back
+    # 将采样点变换到源相机坐标系
     xyz_src = np.matmul(np.linalg.inv(intrinsics_src),
                         np.vstack((xy_src, np.ones_like(x_ref))) * sampled_depth_src.reshape([-1]))
-    # reference 3D space
+    # 将采样点投影回参考坐标系
     xyz_reprojected = np.matmul(np.matmul(extrinsics_ref, np.linalg.inv(extrinsics_src)),
                                 np.vstack((xyz_src, np.ones_like(x_ref))))[:3]
     # source view x, y, depth
-    depth_reprojected = xyz_reprojected[2].reshape([height, width]).astype(np.float32)
+    depth_reprojected = xyz_reprojected[2].reshape([height, width]).astype(np.float32)  # 深度
     k_xyz_reprojected = np.matmul(intrinsics_ref, xyz_reprojected)
     xy_reprojected = k_xyz_reprojected[:2] / k_xyz_reprojected[2:3]
     x_reprojected = xy_reprojected[0].reshape([height, width]).astype(np.float32)
@@ -180,9 +188,11 @@ def check_geometric_consistency(
         depth_ref, intrinsics_ref, extrinsics_ref, depth_src, intrinsics_src, extrinsics_src)
 
     # check |p_reproject - p_1| < 1
+    # 源深度对应的像素点，和参考深度对应的像素点，的距离
     dist = np.sqrt((x2d_reprojected - x_ref) ** 2 + (y2d_reprojected - y_ref) ** 2)
 
     # check |d_reproject - d_1| / d_1 < 0.01
+    # 源深度和参考深度的距离
     depth_diff = np.abs(depth_reprojected - depth_ref)
     relative_depth_diff = depth_diff / depth_ref
 
@@ -219,7 +229,16 @@ def filter_depth(args, scan: str = ""):
         confidence = read_map(
             os.path.join(args.output_folder, scan, "confidence/{:0>8}{}".format(ref_view, args.file_format)))
 
+        # 光度mask
         photo_mask = (confidence > args.photo_thres).squeeze(2)
+
+        # 语义mask,读取并转换为二值图像
+        semantic_mask = None
+        if args.use_road_mask:
+            mask_image_raw = Image.open(
+                os.path.join(args.input_folder, scan, "road_mask/{:0>8}.jpg".format(ref_view))).convert('L')
+            semantic_mask = np.array(mask_image_raw, dtype=np.int32)
+            semantic_mask = semantic_mask > 0
 
         all_src_view_depth_estimates = []
 
@@ -255,6 +274,10 @@ def filter_depth(args, scan: str = ""):
 
         geo_mask = geo_mask_sum >= args.geo_mask_thres
         final_mask = np.logical_and(photo_mask, geo_mask)
+        if args.use_road_mask:
+            final_mask = np.logical_and(final_mask, semantic_mask)
+
+        # final_mask = semantic_mask
 
         os.makedirs(os.path.join(args.output_folder, scan, "mask"), exist_ok=True)
         save_image(os.path.join(args.output_folder, scan, "mask/{:0>8}_photo.png".format(ref_view)), photo_mask)
@@ -306,6 +329,7 @@ if __name__ == "__main__":
 
     # High level input/output options
     parser.add_argument("--input_folder", type=str, help="input data path")
+    parser.add_argument("--mask_folder", type=str, default='', help="input mask path")
     parser.add_argument("--output_folder", type=str, default="", help="output path")
     parser.add_argument("--checkpoint_path", type=str, help="load a specific checkpoint for parameters of model")
     parser.add_argument("--file_format", type=str, default=".pfm", help="File format for depth maps",
@@ -314,6 +338,8 @@ if __name__ == "__main__":
                         choices=["params", "module"])
     parser.add_argument("--output_type", type=str, default="both", help="Type of outputs to produce",
                         choices=["depth", "fusion", "both"])
+    parser.add_argument("--colmap_dense_folder", type=str, default='', help="input colmap_dense_folder path")
+
 
     # Dataset loading options
     parser.add_argument("--num_views", type=int, default=20,
@@ -325,6 +351,8 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=1, help="evaluation batch size")
 
     # PatchMatchNet module options (only used when not loading from file)
+    #parser.add_argument("--patchmatch_interval_scale", nargs="+", type=float, default=[0.005, 0.0125, 0.025],
+    #                    help="normalized interval in inverse depth range to generate samples in local perturbation")
     parser.add_argument("--patchmatch_interval_scale", nargs="+", type=float, default=[0.005, 0.0125, 0.025],
                         help="normalized interval in inverse depth range to generate samples in local perturbation")
     parser.add_argument("--patchmatch_range", nargs="+", type=int, default=[6, 4, 2],
@@ -340,6 +368,8 @@ if __name__ == "__main__":
 
     # Stereo fusion options
     parser.add_argument("--display", action="store_true", default=False, help="display depth images and masks")
+    parser.add_argument("--use_road_mask", action="store_true", default=False, help="display depth images and masks")
+
     parser.add_argument("--geo_pixel_thres", type=float, default=1.0,
                         help="pixel threshold for geometric consistency filtering")
     parser.add_argument("--geo_depth_thres", type=float, default=0.01,

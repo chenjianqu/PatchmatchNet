@@ -335,3 +335,59 @@ def solve_intersection(plane_paras, O, dirs):
     # 计算射线和平面的交点
     intersection = O + k.squeeze(2) * dirs  # [B,3,N]
     return intersection
+
+
+def grid_plane_fit(depth, mask, K):
+    '''
+    在mask区域内，划分网格，并对每个网格拟合平面，将拟合得到的平面的深度设置为新的深度
+    Args:
+        depth:[B,1,H,W] 已有的深度图
+        mask:[B,H,W] mask
+        K:(B,3,3), 内参矩阵
+    Returns:
+    '''
+    batch_size, _, height, width = depth.shape
+    device = depth.device
+    grid_size = int(height / 10)  # 用于估计平面的网格大小
+
+    K_inv = torch.linalg.inv(K)  # [B,3,3]
+
+    for start_y in range(0, height - grid_size, grid_size):
+        for start_x in range(0, width - grid_size, grid_size):
+            end_y = start_y + grid_size
+            end_x = start_x + grid_size
+            mask_roi = mask[:, start_y:end_y, start_x:end_x]  # [B,S,S]
+            if mask_roi.sum() < 5:
+                continue
+            mask_roi = mask_roi.reshape([batch_size, -1])
+
+            y_grid, x_grid = torch.meshgrid(
+                [
+                    torch.arange(start_y, end_y, dtype=torch.float32, device=device),
+                    torch.arange(start_x, end_x, dtype=torch.float32, device=device),
+                ]
+            )
+            y_grid, x_grid = y_grid.contiguous().view(grid_size * grid_size), x_grid.contiguous().view(
+                grid_size * grid_size)
+            xy = torch.stack((x_grid, y_grid, torch.ones_like(x_grid)))  # [3, S*S]
+            xy = torch.unsqueeze(xy, 0).repeat(batch_size, 1, 1)  # [B, 3, S*S]
+            xyd = xy * depth[:, :, start_y:end_y, start_x:end_x].reshape([batch_size, -1])  # [B, 3, S*S]
+            xyz = torch.matmul(K_inv, xyd)  # [B, 3, S*S]
+
+            # 平面拟合
+            xyz_masked = xyz[:, :, mask_roi[0]]  # [B, 3, N]
+            planes = plane_fit(xyz_masked)  # [4]
+
+            # 求射线交点
+            O = torch.zeros([batch_size, 3, 1], dtype=torch.float32, device=device)  # [B,3,1]
+            dirs = xyz / xyz[:, 2]  # [B,3,N]
+            points_inter = solve_intersection(planes, O, dirs)  # [B,3,N]
+
+            # 投影交点，得到新的深度
+            xyd = torch.matmul(K, points_inter)  # [B,3,N]
+            d_new = xyd[:, 2]  # [B,N]
+
+            # 将新的深度应用到输入的深度图中
+            d = d_new.reshape(batch_size, grid_size, grid_size)  # [B,S,S]
+            mask_depth = mask_roi.reshape(batch_size, grid_size, grid_size)
+            (depth[:, :, start_y:end_y, start_x:end_x])[mask_depth.unsqueeze(1)] = d[mask_depth]

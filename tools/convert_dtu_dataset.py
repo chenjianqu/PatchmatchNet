@@ -3,7 +3,9 @@ import numpy as np
 import os
 import shutil
 from PIL import Image
+import sys
 
+sys.path.append("..")
 from datasets.data_io import read_image, read_map, save_image, save_map
 
 if __name__ == "__main__":
