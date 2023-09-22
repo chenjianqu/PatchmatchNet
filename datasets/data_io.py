@@ -1,4 +1,5 @@
 """Utilities for reading and writing images, depth maps, and auxiliary data (cams, pairs) from/to disk."""
+import errno
 import os.path
 import re
 import struct
@@ -26,7 +27,13 @@ def scale_to_max_dim(image: np.ndarray, max_dim: int) -> Tuple[np.ndarray, int, 
     if 0 < scale < 1:
         width = int(scale * original_width)
         height = int(scale * original_height)
+
+        width = (width//8)*8  # 宽高须为8的倍数
+        height = (height//8)*8
+
         image = cv2.resize(image, (width, height), interpolation=cv2.INTER_LINEAR)
+        if image.ndim == 2: # 如果ndim为2,说明是单通道图像
+            image = np.expand_dims(image, axis=2)
 
     return image, original_height, original_width
 
@@ -57,7 +64,7 @@ def read_image_set_mask(filename: str, max_dim: int = -1) -> Tuple[np.ndarray, i
     Returns:
         Tuple of scaled image along with original image height and width
     """
-    mask_file_name = os.path.dirname(os.path.dirname(filename)) + "/road_mask/"+os.path.basename(filename)
+    mask_file_name = os.path.dirname(os.path.dirname(filename)) + "/road_mask/" + os.path.basename(filename)
     road_mask_raw = Image.open(mask_file_name)
     road_mask_int = np.array(road_mask_raw, dtype=np.int32)
     road_mask = road_mask_int > 0
@@ -70,16 +77,15 @@ def read_image_set_mask(filename: str, max_dim: int = -1) -> Tuple[np.ndarray, i
     return scale_to_max_dim(np_image, max_dim)
 
 
-def write_depth_img(filename,depth):
-
+def write_depth_img(filename, depth):
     if not os.path.exists(os.path.dirname(filename)):
         try:
             os.makedirs(os.path.dirname(filename))
-        except OSError as exc: # Guard against race condition
+        except OSError as exc:  # Guard against race condition
             if exc.errno != errno.EEXIST:
                 raise
 
-    image = Image.fromarray((depth-500)/2).convert("L")
+    image = Image.fromarray((depth - 500) / 2).convert("L")
     image.save(filename)
     return 1
 
@@ -275,7 +281,7 @@ def read_pfm(filename: str) -> Tuple[np.ndarray, float]:
     header = file.readline().decode("utf-8").rstrip()
     if header == "PF":
         color = True
-    elif header == "Pf": # depth is Pf
+    elif header == "Pf":  # depth is Pf
         color = False
     else:
         raise Exception("Not a PFM file.")

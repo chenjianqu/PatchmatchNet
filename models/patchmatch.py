@@ -76,7 +76,7 @@ class DepthInitialization(nn.Module):
 
             # 使用地面假设
             if mask is not None:
-                K_np = K.cpu().numpy()[0]
+                K_np = K.detach().cpu().numpy()[0]
                 depth_ground_np = ground_plane_init_depth(width, height, K_np)
                 depth_ground = torch.from_numpy(depth_ground_np).cuda()  # [H,W]
                 depth_mask = depth_ground > 0
@@ -133,8 +133,8 @@ class DepthInitialization(nn.Module):
             inverse_depth_interval = (inverse_min_depth - inverse_max_depth) * depth_interval_scale
             inverse_depth_interval = inverse_depth_interval.view(batch_size, 1, 1, 1)
 
-            inv_scale = inverse_depth_interval.view([-1]).item()
-            half_num_sample = self.patchmatch_num_sample // 2
+            # inv_scale = inverse_depth_interval.view([-1]).item()
+            # half_num_sample = self.patchmatch_num_sample // 2
 
             depth_sample = 1.0 / depth.detach() + inverse_depth_interval * depth_sample_raw
 
@@ -638,7 +638,7 @@ class PatchMatch(nn.Module):
                 is_inverse=is_inverse,
             )
             depth_sample = depth_sample.unsqueeze(1)  # [B,1,H,W]
-            depth_sample_debug = depth_sample.cpu().numpy()
+            # depth_sample_debug = depth_sample.cpu().numpy()
             depth_samples.append(depth_sample)
 
         return depth_samples, score, view_weights

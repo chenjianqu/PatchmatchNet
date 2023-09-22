@@ -9,8 +9,10 @@ MVS_TRAINING="/media/cjq/新加卷/datasets/OpenSourceDatasets/training/dtu_Patc
 
 
 # Train on converted DTU training set
-python train.py --batch_size 4 --epochs 8 --num_light_idx 7 --input_folder=$MVS_TRINING --output_folder=$MVS_TRAINING \
---train_list=lists/dtu/train.txt --test_list=lists/dtu/val.txt "$@"
+python train.py --batch_size 3 --epochs 8 --num_light_idx 7 --input_folder=$MVS_TRAINING --output_folder=$MVS_TRAINING \
+--train_list=lists/dtu/train.txt --test_list=lists/dtu/val.txt --image_max_dim 400 "$@"
+
+
 
 # Legacy train on DTU's training set
 #python train_dtu.py --batch_size 4 --epochs 8 --trainpath=$MVS_TRAINING --trainlist lists/dtu/train.txt \

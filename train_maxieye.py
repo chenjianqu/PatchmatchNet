@@ -10,7 +10,7 @@ from torch.optim import Optimizer
 from torch.utils.data import DataLoader
 from typing import List, Tuple
 
-from datasets.mvs import MVSDataset
+from datasets.mvs_maxieye import MaxieyeMVSDataset
 from models import PatchmatchNet, patchmatchnet_loss
 from utils import *
 
@@ -48,13 +48,14 @@ def train(
                 os.path.join(args.output_folder, "params_{:0>6}.ckpt".format(epoch_idx))
             )
             # There is only one child here (PatchmatchNet module), but we have to use the iterator to access it
-            for child_model in model.children():
-                child_model.eval()
-                sm = torch.jit.script(child_model)
-                sm.save(os.path.join(args.output_folder, "module_{:0>6}.pt".format(epoch_idx)))
-                child_model.train()
+            # for child_model in model.children():
+            #     child_model.eval()
+            #     sm = torch.jit.script(child_model)
+            #     sm.save(os.path.join(args.output_folder, "module_{:0>6}.pt".format(epoch_idx)))
+            #     child_model.train()
 
         # testing
+        print("start testing")
         process_samples(args, test_sample, "test", logger, model, test_image_loader, optimizer, epoch_idx)
 
         logger.flush()
@@ -139,9 +140,9 @@ def process_sample(
 
     sample_cuda = to_cuda(sample)
 
-    # print(type(sample_cuda["images"]),sample_cuda["images"][0].shape)
-    # print("depth_gt.shape",sample_cuda["depth_gt"].shape)
-    # print("depth_gt.mask",sample_cuda["mask"].shape)
+    #print(type(sample_cuda["images"]), sample_cuda["images"][0].shape,sample_cuda["images"][0].dtype)
+    print("depth_gt.shape", sample_cuda["depth_gt"].shape)
+    #print("depth_gt.mask", sample_cuda["mask"].shape)
     # return None
 
     # 前向传播
@@ -156,9 +157,13 @@ def process_sample(
     # print(type(depths))  # Dict
     # print(type(depths[0]))  # List
     # print(type(depths[0][0]))  # Tensor
-    # print(depths[0][0].shape)  # [B,1,H,W]
+    #for key,value in depths.items():
+    #    print("%d output,len:%d ,depths.shape:%s" % (key,len(depths[key]),depths[key][0].shape))  # [B,1,H,W]
     # depths : Dict{int, List[torch.Tensor]}
-
+    # 3 output, len: 2, depths.shape: torch.Size([3, 1, 31, 60])
+    # 2 output, len: 2, depths.shape: torch.Size([3, 1, 62, 120])
+    # 1 output, len: 1, depths.shape: torch.Size([3, 1, 124, 240])
+    # 0 output, len: 1, depths.shape: torch.Size([3, 1, 248, 480])
 
     # 获得真值
     depth_gt = create_stage_images(sample_cuda["depth_gt"])
@@ -218,8 +223,9 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="PatchMatchNet for high-resolution multi-view stereo")
     parser.add_argument("--mode", type=str, default="train", help="Execution mode", choices=["train", "test"])
-    parser.add_argument("--input_folder", type=str, help="input data path")
-    parser.add_argument("--output_folder", type=str, default="", help="output path")
+    parser.add_argument("--input_folder", default="/home/cjq/data/mvs/kaijin", type=str, help="input data path")
+    parser.add_argument("--input_lidar_folder", default="/home/cjq/data/mvs/lidar", type=str, help="input data path")
+    parser.add_argument("--output_folder", type=str, default="/home/cjq/data/mvs/kaijin", help="output path")
     parser.add_argument("--checkpoint_path", type=str, default="", help="load a specific checkpoint for parameters")
 
     # Dataset loading options
@@ -228,7 +234,6 @@ if __name__ == "__main__":
     parser.add_argument("--image_max_dim", type=int, default=640, help="max image dimension")
     parser.add_argument("--train_list", type=str, help="training scan list text file")
     parser.add_argument("--test_list", type=str, help="validation scan list text file")
-    parser.add_argument("--num_light_idx", type=int, default=-1, help="Number of light indexes in source images")
     parser.add_argument("--batch_size", type=int, default=12, help="train batch size")
 
     # Training options
@@ -260,35 +265,37 @@ if __name__ == "__main__":
     # parse arguments and check
     input_args = parser.parse_args()
 
+    train_datasets = ['20221020_5.78km_2022-11-29-13-55-40',
+                      "20221027_6.58km_2022-12-04-08-37-08",
+                      "20221027_6.58km_2022-12-04-09-08-14",
+                      "20221027_6.58km_2022-12-04-11-38-23_part1",
+                      ]
+    test_datasets = ['20221027_6.58km_2022-12-04-11-38-23_part2', ]
+
     print("argv:", sys.argv[1:])
     print_args(input_args)
 
     if not os.path.isdir(input_args.input_folder):
         raise Exception("Invalid input folder: {}".format(input_args.input_folder))
-    if not os.path.isfile(input_args.train_list):
-        raise Exception("Invalid training scan list file: {}".format(input_args.train_list))
-    if not os.path.isfile(input_args.test_list):
-        raise Exception("Invalid validation scan list file: {}".format(input_args.test_list))
-
     if not input_args.output_folder:
         input_args.output_folder = input_args.input_folder
 
     torch.manual_seed(input_args.rand_seed)
     torch.cuda.manual_seed(input_args.rand_seed)
 
-    train_dataset = MVSDataset(
-        data_path=input_args.input_folder,
+    train_dataset = MaxieyeMVSDataset(
+        data_root=input_args.input_folder,
+        lidar_data_root=input_args.input_lidar_folder,
         num_views=input_args.num_views,
         max_dim=input_args.image_max_dim,
-        scan_list=input_args.train_list,
-        num_light_idx=input_args.num_light_idx
+        scan_list=train_datasets,
     )
-    test_dataset = MVSDataset(
-        data_path=input_args.input_folder,
+    test_dataset = MaxieyeMVSDataset(
+        data_root=input_args.input_folder,
+        lidar_data_root=input_args.input_lidar_folder,
         num_views=input_args.num_views,
         max_dim=input_args.image_max_dim,
-        scan_list=input_args.test_list,
-        num_light_idx=input_args.num_light_idx
+        scan_list=test_datasets,
     )
 
     train_loader = DataLoader(train_dataset, input_args.batch_size, shuffle=True, num_workers=8, drop_last=True)

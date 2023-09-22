@@ -97,7 +97,9 @@ class MVSDataset(Dataset):
 
                 if os.path.isfile(depth_gt_filename):
                     # Using `copy()` here to avoid the negative stride resulting from the transpose
-                    depth_gt = read_map(depth_gt_filename, self.max_dim).transpose([2, 0, 1]).copy()
+                    depth_gt = read_map(depth_gt_filename, self.max_dim)
+                    #print(depth_gt.shape)
+                    depth_gt = depth_gt.transpose([2, 0, 1]).copy()
                     # Create mask from GT depth map
                     mask = depth_gt >= depth_min
 
