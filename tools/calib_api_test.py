@@ -53,15 +53,35 @@
 #
 # print(D)
 #
-import cv2
 import numpy as np
 
-mask = cv2.imread("/home/cjq/data/mvs/lidar/20221020_5.78km_2022-11-29-13-55-40/semantic_maps_ori/1669701514.876.png",-1)
-#print(mask)
-print(mask.shape)
+# import cv2
+# import numpy as np
+#
+# mask = cv2.imread("/home/cjq/data/mvs/lidar/20221020_5.78km_2022-11-29-13-55-40/semantic_maps_ori/1669701514.876.png",-1)
+# #print(mask)
+# print(mask.shape)
+#
+# mask = mask.reshape([-1])
+# mask_unique = np.unique(mask)
+#
+# print(mask_unique)
 
-mask = mask.reshape([-1])
-mask_unique = np.unique(mask)
+#
+# T_wl = np.matrix([[1,2,3,4],[4,5,6,7],[7,8,9,10]])
+#
+# xyz_offset = T_wl[:3, 3]
+# print(xyz_offset)
+#
+# T_wl[:3, 3] = T_wl[:3, 3] - xyz_offset
+# print(T_wl)
 
-print(mask_unique)
+W=3
+H=2
+xx, yy = np.meshgrid(np.arange(0, W), np.arange(0, H))
+xx, yy = xx.reshape(-1), yy.reshape(-1)
+
+print(xx)
+print(yy)
+
 

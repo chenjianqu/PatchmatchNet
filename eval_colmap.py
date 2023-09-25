@@ -13,7 +13,9 @@ from torch.utils.data import DataLoader
 
 from datasets.data_io import read_cam_file, read_image, read_map, read_pair_file, save_image, save_map
 from datasets.mvs_colmap import ColmapMVSDataset
+from models.module import generate_pointcloud
 from models.net import PatchmatchNet
+from tools.visualize_utils import vis_points
 from utils import print_args, tensor2numpy, to_cuda
 from PIL import Image
 
@@ -74,6 +76,9 @@ def save_depth(args):
 
             print("Iter {}/{}, time = {:.3f}".format(batch_idx + 1, len(image_loader), time.time() - start_time))
             filenames = sample["filename"]
+
+            xyz, rgb = generate_pointcloud(depth[0][0], tensor2numpy(sample["images"][0][0]), tensor2numpy(sample["intrinsics"][0][0]))
+            vis_points([xyz.transpose()], [rgb])
 
             # visualize_utils.visualize_depth(None,depth,sample["intrinsics"][0],confidence)
 
@@ -340,7 +345,6 @@ if __name__ == "__main__":
                         choices=["depth", "fusion", "both"])
     parser.add_argument("--colmap_dense_folder", type=str, default='', help="input colmap_dense_folder path")
 
-
     # Dataset loading options
     parser.add_argument("--num_views", type=int, default=20,
                         help="number of source views for each patch-match problem")
@@ -351,7 +355,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=1, help="evaluation batch size")
 
     # PatchMatchNet module options (only used when not loading from file)
-    #parser.add_argument("--patchmatch_interval_scale", nargs="+", type=float, default=[0.005, 0.0125, 0.025],
+    # parser.add_argument("--patchmatch_interval_scale", nargs="+", type=float, default=[0.005, 0.0125, 0.025],
     #                    help="normalized interval in inverse depth range to generate samples in local perturbation")
     parser.add_argument("--patchmatch_interval_scale", nargs="+", type=float, default=[0.005, 0.0125, 0.025],
                         help="normalized interval in inverse depth range to generate samples in local perturbation")

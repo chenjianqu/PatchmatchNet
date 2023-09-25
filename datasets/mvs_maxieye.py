@@ -13,8 +13,11 @@ from PIL import Image
 from datasets.data_io import read_cam_file, read_image, read_pair_file, scale_to_max_dim
 from torch.utils.data import Dataset, DataLoader
 from typing import List, Tuple, Dict
+
+from models.module import generate_pointcloud
 from tools.colmap_utils import read_model_get_points
 from tools.pose_utils import convert_rvector_to_pose_mat, convert_rollyawpitch_to_rot, convert_quat_to_pose_mat
+from tools.visualize_utils import vis_points, write_ply
 from utils import to_cuda
 
 
@@ -43,6 +46,85 @@ def get_data_param(path_idxs, is_train=True):
     return param_infos_list, data_infos_list, image_paths_list, idxs
 
 
+def project_to_pixel(T_cw: np.ndarray, K: np.ndarray, xyz_Pw: np.ndarray):
+    '''
+    将点从坐标系w，变换到像素坐标系
+    Args:
+        T_cw: 外参矩阵 [4,4]
+        K: 内参矩阵 [3,3]
+        xyz_Pw: 点集合 [3,N]
+    Returns: xy：[2,N]像素坐标（np.int16），depth:[N]深度值（np.float32）
+
+    '''
+    xyz_ci = T_cw[:3, :3].dot(xyz_Pw) + np.expand_dims(T_cw[:3, 3], axis=1)  # [3,N]
+    xyd = K.dot(xyz_ci)  # [3,N]
+    depth = xyd[2, :]  # [N]
+    xy = (xyd / depth)[:2]  # [2,N]
+    xy = xy.astype(np.int16)
+    return xy, depth
+
+
+def read_semantic_mask(mask_path: str, semantic_value: List[int] = None, dilate_size: int = -1,
+                       img_size: Tuple[int, int] = (),
+                       maps: Tuple[np.ndarray, np.ndarray] = None,
+                       camera_mask: np.ndarray = None,
+                       ):
+    """
+    读取语义mask，并进行膨胀处理
+    Args:
+        camera_mask: (w,h),相机mask
+        maps: (un_map1,un_map2) 用于去畸变的映射矩阵
+        img_size: (w,h)要缩放到图像的大小
+        mask_path: mask图像的路径
+        semantic_value: 语义值（mask掉的区域）
+        dilate_size: 膨胀的半径
+
+    Returns: 二值语义图像 [H,W]
+    """
+    if semantic_value is None:
+        semantic_value = [20]
+
+    mask_img = cv2.imread(mask_path, -1)
+
+    if mask_img is None:
+        mask_img = np.ones((img_size[1],img_size[0]),dtype=bool)
+        return mask_img
+
+    assert mask_img.ndim == 2
+
+    # 提取特征语义值的mask
+    all_semantic_mask = None
+    if len(semantic_value) == 1:
+        all_semantic_mask = (mask_img == semantic_value[0])  # 车辆的像素值为20
+    else:
+        all_semantic_mask = mask_img == semantic_value[0]
+        for value in semantic_value[1:]:
+            all_semantic_mask = np.logical_or(all_semantic_mask, mask_img == value)
+    # 去除mask区域
+    all_semantic_mask = ~all_semantic_mask
+
+    if camera_mask is not None:
+        assert mask_img.shape[0] == camera_mask.shape[0]
+        assert mask_img.shape[1] == camera_mask.shape[1]
+        all_semantic_mask = np.logical_and(all_semantic_mask,camera_mask)
+
+    mask_img = all_semantic_mask.astype(np.uint8)
+
+    # 去畸变
+    if maps is not None:
+        mask_img = cv2.remap(mask_img, maps[0], maps[1], cv2.INTER_NEAREST)
+
+    # 腐蚀
+    if dilate_size > 0:
+        kernel = np.ones((dilate_size, dilate_size), np.uint8)
+        mask_img = cv2.erode(mask_img, kernel, iterations=1)
+
+    # 缩放
+    if img_size:
+        mask_img = cv2.resize(mask_img, img_size, interpolation=cv2.INTER_NEAREST)
+    return mask_img
+
+
 class MaxieyeMVSDataset(Dataset):
     def __init__(
             self,
@@ -53,7 +135,9 @@ class MaxieyeMVSDataset(Dataset):
             scan_list: List[str] = '',
             robust_train: bool = False,
             regenerate_depth_image: bool = True,
-            vis_sample: bool = False,
+            vis_sample: bool = False,  # 是否可视化图像
+            use_srcs_pointcloud=True,  # 是否使用多帧点云叠在一起
+            camera_mask_path = '',
     ) -> None:
         super(MaxieyeMVSDataset, self).__init__()
 
@@ -64,6 +148,7 @@ class MaxieyeMVSDataset(Dataset):
         self.robust_train = robust_train
         self.metas: List[Tuple[str, str, int, List[int]]] = []
         self.vis_sample = vis_sample
+        self.use_srcs_pointcloud = use_srcs_pointcloud
 
         self.colmap_intrinsic: Dict[int, np.ndarray] = {}
         self.colmap_extrinsic: Dict[str, np.ndarray] = {}
@@ -83,13 +168,18 @@ class MaxieyeMVSDataset(Dataset):
         self.W_list = []
         self.ixes = []
 
+        self.idx_map = {}
+
+        self.camera_mask = None
+        if camera_mask_path != '':
+            self.camera_mask = cv2.imread(camera_mask_path, 0)
+
         for param_infos in param_infos_list:  # 遍历bag
             self.H_list.append(param_infos['imgH_ori'])
             self.W_list.append(param_infos['imgW_ori'])
             self.K_ori_list.append(param_infos['ori_K'])  # 内参
             self.distorts_list.append(np.array(param_infos['dist_coeffs']))
             self.T_lidar2cam_list.append(convert_rvector_to_pose_mat(param_infos['rvector']))  # 旋转向量（lidar2cam）
-
             # 外参
             yaw, pitch, roll = param_infos['yaw'], param_infos['pitch'], param_infos['roll']
             self.rot_list.append(convert_rollyawpitch_to_rot(roll, yaw, pitch).I)
@@ -120,6 +210,7 @@ class MaxieyeMVSDataset(Dataset):
                 sub_samples.append((img_path, pose))
 
             sample_list[image_paths] = [sub_samples, rot, tran, K_ori, distorts, H, W, lidar2cam_vector]
+
         self.ixes = sample_list
 
         # 去畸变
@@ -152,57 +243,90 @@ class MaxieyeMVSDataset(Dataset):
         return len(self.data_idxs)
 
     def get_ref_srcs(self, ref_idx):
-        '''
+        """
         分配参考视图和源视图
         Args:
-        Returns: 返回匹配关系，和每个图像的位姿，其中位姿 [len(recs), 3, 4],位姿是car的位姿 T_car2world或Twc
-        '''
+        Returns: 返回匹配关系，和每个图像的位姿
+        """
         ref_sce_id, ref_sce_id_ind = self.data_idxs[ref_idx]
         sce_name = self.image_paths_list[ref_sce_id]
 
         srcs_idx_list = []  # 配对的源视图索引
+        num_of_src = self.num_views - 1
 
-        for i in range(1, self.num_views + 1):
+        for i in range(1, num_of_src + 1):
             src_idx = ref_idx + i
             if src_idx < len(self.data_idxs):
                 src_sce_id, src_sce_id_ind = self.data_idxs[src_idx]
                 if src_sce_id == ref_sce_id:
                     srcs_idx_list.append(src_idx)
-            if len(srcs_idx_list) >= self.num_views:
+            if len(srcs_idx_list) >= num_of_src:
                 break
             src_idx = ref_idx - i
             if src_idx >= 0:
                 src_sce_id, src_sce_id_ind = self.data_idxs[src_idx]
                 if src_sce_id == ref_sce_id:
                     srcs_idx_list.append(src_idx)
-            if len(srcs_idx_list) >= self.num_views:
+            if len(srcs_idx_list) >= num_of_src:
                 break
 
-        poses = {}  # 参考视图和源视图的位姿
+        poses_dict: Dict[type(ref_idx), Dict[str, np.matrix]] = {}  # 参考视图和源视图的位姿
 
         T_lidar2cam = self.T_lidar2cam_list[ref_sce_id]
         T_lc = np.linalg.inv(T_lidar2cam)
 
         image_path, T_wl = self.ixes[sce_name][0][ref_sce_id_ind]
+        T_wl = T_wl.A.copy()  # 转换为narray格式
+
+        xyz_offset = T_wl[:3, 3].copy()
+        T_wl[:3, 3] = T_wl[:3, 3] - xyz_offset  # 平移量减去同一个值，防止量化误差
         T_wc = T_wl.dot(T_lc)
-        poses[ref_idx] = T_wc
+
+        poses_dict[ref_idx] = {}
+        poses_dict[ref_idx]["Twl"] = T_wl
+        poses_dict[ref_idx]["Twc"] = T_wc
+
+        self.idx_map[ref_idx] = image_path
+
+        # 输出到txt
+        f = open(os.path.join(self.data_root,"pair.txt"),'a')
+        f.write(str(ref_idx)+'\n')
+        f.write(str(len(srcs_idx_list))+" ")
 
         for src_idx in srcs_idx_list:
             src_sce_id, src_sce_id_ind = self.data_idxs[src_idx]
             image_path, T_wl = self.ixes[sce_name][0][src_sce_id_ind]
-            T_wc = T_wl.dot(T_lc)
-            poses[src_idx] = T_wc
+            T_wl = T_wl.A.copy()
+            # print(f"{src_idx} {T_wl}")
 
-        return srcs_idx_list, poses
+            T_wl[:3, 3] = T_wl[:3, 3] - xyz_offset  # 平移量减去同一个值，防止量化误差
+            T_wc = T_wl.dot(T_lc)
+
+            poses_dict[src_idx] = {}
+            poses_dict[src_idx]["Twl"] = T_wl
+            poses_dict[src_idx]["Twc"] = T_wc
+
+            self.idx_map[src_idx] = image_path
+            score = abs(src_idx - ref_idx)
+            f.write(str(src_idx)+" "+str(score)+" ")
+        f.write('\n')
+        f.close()
+
+        return srcs_idx_list, poses_dict
+
+    def write_idx_map(self,write_name="map.txt"):
+        with open(os.path.join(self.data_root,write_name), 'w') as write_f:
+            write_f.write(json.dumps(self.idx_map, indent=4, ensure_ascii=False))
 
     def __getitem__(self, idx):
         sce_id, sce_id_ind = self.data_idxs[idx]  # 获得bag索引和图像索引
         sce_name = self.image_paths_list[sce_id]
 
-        srcs_idx_list, poses = self.get_ref_srcs(idx)
-        assert len(srcs_idx_list) == self.num_views
-
+        # 参考视图-源视图的配对
+        srcs_idx_list, poses_dict = self.get_ref_srcs(idx)
         view_ids = [idx] + srcs_idx_list
+
+        assert len(view_ids) == self.num_views
 
         images = []
         intrinsics_list = []
@@ -212,15 +336,14 @@ class MaxieyeMVSDataset(Dataset):
 
         # 获取内参
         K_un = self.K_un_list[sce_id]
-        un_map1 = self.un_map1_list[sce_id]
-        un_map2 = self.un_map2_list[sce_id]
+        un_map1, un_map2 = self.un_map1_list[sce_id], self.un_map2_list[sce_id]
 
-        ref_image = None
+        ref_image = None  # 用于可视化
 
         for i, image_idx in enumerate(view_ids):
             image_sce_id, image_sce_id_ind = self.data_idxs[image_idx]
             # 图像去畸变
-            image_path, T_wl = self.ixes[sce_name][0][image_sce_id_ind]
+            image_path, _ = self.ixes[sce_name][0][image_sce_id_ind]
             img = cv2.imread(image_path)
             img_un = cv2.remap(img, un_map1, un_map2, cv2.INTER_LINEAR)
             # 缩放图像
@@ -237,7 +360,10 @@ class MaxieyeMVSDataset(Dataset):
 
             images.append(img_un.transpose([2, 0, 1]))
 
-            T_wc = poses[image_idx].A.astype(np.float32)
+            T_wc = poses_dict[image_idx]["Twc"].A.astype(np.float32)
+            # if abs(T_wc.max()) > 1000:
+            #    print(i, image_idx)
+            # print(T_wc)
             extrinsics_list.append(T_wc)
 
         intrinsics = np.stack(intrinsics_list)  # [N,3,3]
@@ -246,94 +372,99 @@ class MaxieyeMVSDataset(Dataset):
         H, W, C = ref_image.shape
 
         T_cl = self.T_lidar2cam_list[sce_id].A  # 外参
-        T_lc = np.linalg.inv(T_cl)
-
-        depth_img = np.empty(0)
+        depth_img = np.empty(0)  # 深度图像
 
         ref_image_path, _ = self.ixes[sce_name][0][sce_id_ind]
-        timestamp = Path(ref_image_path).stem + ".png"
-        depth_path = os.path.join(self.train_lidar_list[sce_id], "depths", timestamp)
+        ref_depth_path = os.path.join(self.train_lidar_list[sce_id], "depths", Path(ref_image_path).stem + ".png")
 
-        if not self.regenerate_depth_image and os.path.exists(depth_path):
-            depth_img = cv2.imread(depth_path, -1)
+        if not self.regenerate_depth_image and os.path.exists(ref_depth_path):
+            depth_img = cv2.imread(ref_depth_path, -1)
         else:
+            ref_semantic_mask = None  # 参考视图的语义mask
             depth_img = np.zeros((H, W), dtype=np.float32)
-            # 将所有的点云融合到参考视图
-            _, T_wl0 = self.ixes[sce_name][0][sce_id_ind]  # 获得参考帧的位姿
+
+            T_wl0 = poses_dict[view_ids[0]]["Twl"]  # 获得参考帧的位姿
             K0 = intrinsics_list[0]  # 参考帧的内参
+
+            # 将所有的点云融合到参考视图
             for i, image_idx in enumerate(view_ids):
                 image_sce_id, image_sce_id_ind = self.data_idxs[image_idx]
-                image_path, T_wli = self.ixes[sce_name][0][image_sce_id_ind]
-                T_l0li = np.linalg.inv(T_wl0).dot(T_wli)
-                T_l0li = T_l0li.A  # 从lidar_i到lidar_0的相对变换
+                image_path, _ = self.ixes[sce_name][0][image_sce_id_ind]
+                T_wli = poses_dict[image_idx]["Twl"]
+                T_l0li = np.linalg.inv(T_wl0).dot(T_wli)  # 从lidar_i到lidar_0的相对变换
                 Ki = intrinsics_list[i]  # 源视图的内参
 
+                # 读取点云
                 timestamp = Path(image_path).stem + ".npy"
                 point_path = os.path.join(self.train_lidar_list[sce_id], "depths_single_with_obj_time_ori", timestamp)
-
                 points = np.load(point_path)  # [N,5]
                 xyz_li = points[:, :3]  # [N,3]
                 xyz_li = xyz_li.T  # [3,N]
 
-                # 根据语义分割的mask，去除动态物体
-
-                # 首先将点投影到相机坐标系i
-                xyz_ci = T_cl[:3, :3].dot(xyz_li) + np.expand_dims(T_cl[:3, 3], axis=1)  # [3,N]
-                xyd = Ki.dot(xyz_ci)  # [3,N]
-                depth = xyd[2, :]  # [N]
-                xy = (xyd / depth)[:2]  # [2,N]
-                xy = xy.astype(np.int16)
-
-                # 处于图像之外的点
-                field_mask = xy[0, :] <= 0
-                field_mask = np.logical_and(field_mask, xy[0, :] >= W)
-                field_mask = np.logical_and(field_mask, xy[1, :] <= 0)
-                field_mask = np.logical_and(field_mask, xy[1, :] >= H)
-
-                xx, yy = xy[0], xy[1]
-                xx = np.clip(xx, 0, W - 1)
-                yy = np.clip(yy, 0, H - 1)
-
                 # 读取语义mask
                 timestamp = Path(image_path).stem + ".png"
                 mask_path = os.path.join(self.train_lidar_list[sce_id], "semantic_maps_ori", timestamp)
-                mask_img = cv2.imread(mask_path, -1)
-                mask_img = (mask_img == 20).astype(np.uint8)  # [N,] 车辆的像素值为20
+                semantic_mask_img = read_semantic_mask(mask_path, img_size=(W, H), maps=(un_map1, un_map2),
+                                                       dilate_size=15, semantic_value=[20],
+                                                       camera_mask=self.camera_mask)
 
-                kernel = np.ones((4, 4), np.uint8)
-                mask_img = cv2.dilate(mask_img, kernel, iterations=1)
+                if i == 0:
+                    ref_semantic_mask = semantic_mask_img
+                else:  # 根据语义分割的mask，去除动态物体
+                    xy, depth = project_to_pixel(T_cl, Ki, xyz_li)  # 首先将点投影到相机坐标系i
 
-                mask_value = mask_img[yy, xx]
-                semantic_mask = mask_value == 0
-                final_mask = np.logical_or(field_mask, semantic_mask)
+                    # 处于图像之外的点
+                    field_mask1 = np.logical_or(xy[0, :] <= 0, xy[0, :] >= W)
+                    field_mask2 = np.logical_or(xy[1, :] <= 0, xy[1, :] >= H)
+                    field_mask = np.logical_or(field_mask1, field_mask2)
 
-                xyz_li = xyz_li[:, final_mask]
+                    xx, yy = xy[0], xy[1]
+                    xx = np.clip(xx, 0, W - 1)
+                    yy = np.clip(yy, 0, H - 1)
+
+                    semantic_mask = semantic_mask_img[yy, xx] > 0
+                    depth_mask = np.logical_and(depth >= depth_min, depth <= depth_max)
+                    # 只保留非动态区域，且深度值有效的点
+                    semantic_mask = np.logical_and(semantic_mask, depth_mask)
+
+                    final_mask = np.logical_or(field_mask, semantic_mask)
+                    xyz_li = xyz_li[:, final_mask]
 
                 # 变换到lidar0坐标系
                 xyz_l0 = T_l0li[:3, :3].dot(xyz_li) + np.expand_dims(T_l0li[:3, 3], axis=1)
+                xy, depth = project_to_pixel(T_cl, K0, xyz_l0)  # 投影到像素坐标系
 
-                xyz_c0 = T_cl[:3, :3].dot(xyz_l0) + np.expand_dims(T_cl[:3, 3], axis=1)  # [3,N]
+                # 只判断图像区域内的mask
+                field_mask1 = np.logical_and(xy[0, :] >= 0, xy[0, :] < W)
+                field_mask2 = np.logical_and(xy[1, :] >= 0, xy[1, :] < H)
+                field_mask = np.logical_and(field_mask1, field_mask2)
 
-                xyd = K0.dot(xyz_c0)  # [3,N]
-                depth = xyd[2, :]  # [N]
-                xy = (xyd / depth)[:2]  # [2,N]
+                # 只保留投影后非动态物体的点
+                xx, yy = xy[0], xy[1]
+                xx = np.clip(xx, 0, W - 1)
+                yy = np.clip(yy, 0, H - 1)
+                semantic_mask = ref_semantic_mask[yy, xx] > 0
 
-                valid = xy[0, :] > 0
-                valid = np.logical_and(valid, xy[0, :] < W)
-                valid = np.logical_and(valid, xy[1, :] > 0)
-                valid = np.logical_and(valid, xy[1, :] < H)
+                # 只保留有效深度内的点
+                depth_mask = np.logical_and(depth >= depth_min, depth <= depth_max)
 
-                xy = xy[:, valid]  # [2,N]
-                depth = depth[valid]
+                final_mask = np.logical_and(field_mask, semantic_mask)
+                final_mask = np.logical_and(final_mask, depth_mask)
+
+                xy = xy[:, final_mask]  # [2,N]
+                depth = depth[final_mask]
                 if len(depth) == 0:
                     continue
 
-                xy = xy.astype(np.int16)
                 depth_img[xy[1, :], xy[0, :]] = depth
 
                 if self.vis_sample:
                     for i in range(xy.shape[1]):
                         cv2.circle(ref_image, (xy[0, i], xy[1, i]), 2, (255, 0, 255), -1)
+
+                if not self.use_srcs_pointcloud:
+                    break
+
                 # cv2.imwrite(depth_path,depth_img)
                 # print("write to:%s" % depth_path)
 
@@ -360,6 +491,7 @@ class MaxieyeMVSDataset(Dataset):
             "depth_max": depth_max,  # Tensor: [1]
             "depth_gt": depth_gt,  # Tensor: [1,H0,W0] if exists
             "mask": mask,
+            "file_path":self.idx_map[idx]
         }
 
 
@@ -367,21 +499,55 @@ if __name__ == "__main__":
     data_root = "/home/cjq/data/mvs/kaijin"
     lidar_data_root = "/home/cjq/data/mvs/lidar"
 
-    train_datasets = ['20221020_5.78km_2022-11-29-13-55-40', ]
+    train_datasets = ['20221027_6.58km_2022-12-04-09-08-14', ]
 
     dataloader = MaxieyeMVSDataset(data_root, lidar_data_root,
-                                   num_views=6,
-                                   max_dim=640,
-                                   scan_list=train_datasets)
+                                   num_views=7,
+                                   max_dim=800,
+                                   scan_list=train_datasets,
+                                   vis_sample=True,
+                                   use_srcs_pointcloud=True,
+                                   camera_mask_path='/media/cjq/新加卷/datasets/220Dataset/GS4-2M.png'
+                                   )
 
     image_loader = DataLoader(
-        dataset=dataloader, batch_size=1, shuffle=False, num_workers=1, drop_last=False)
+        dataset=dataloader, batch_size=1, shuffle=True, num_workers=1, drop_last=False)
+
+    cnt=0
 
     for batch_idx, sample in enumerate(image_loader):
         start_time = time.time()
 
-        sample_cuda = to_cuda(sample)
+        # sample_cuda = to_cuda(sample)
+        # print(type(sample_cuda["images"]), sample_cuda["images"][0].shape, sample_cuda["images"][0].dtype)
+        # print("depth_gt.shape", sample_cuda["depth_gt"].shape)
+        # print("depth_gt.mask", sample_cuda["mask"].shape)
 
-        print(type(sample_cuda["images"]), sample_cuda["images"][0].shape, sample_cuda["images"][0].dtype)
-        print("depth_gt.shape", sample_cuda["depth_gt"].shape)
-        print("depth_gt.mask", sample_cuda["mask"].shape)
+        ref_image = sample["images"][0][0]  # [3,H,W]
+        depth_image = sample["depth_gt"][0]  # [1,H,W]
+        K = sample["intrinsics"][0][0]  # [3,3]
+
+        cnt +=1
+
+        if cnt>10:
+            break
+
+        # print(type(ref_image))
+        # print(ref_image.shape)
+        # print(type(depth_image))
+        # print(depth_image.shape)
+
+        #if batch_idx%20==0:
+            # xyz, rgb = generate_pointcloud(depth_image[0].numpy(), ref_image.numpy(), K.numpy())
+            # xyz:[3,N]
+            # rgb:[N,3]
+            #vis_points([xyz.transpose()],[rgb])
+
+        xyz, rgb = generate_pointcloud(depth_image[0].numpy(), ref_image.numpy(), K.numpy())
+        # xyz:[3,N]
+        # rgb:[N,3]
+        # vis_points([xyz.transpose()],[rgb])
+        write_ply("test.ply",xyz.transpose(),rgb)
+
+    dataloader.write_idx_map()
+

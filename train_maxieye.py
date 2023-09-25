@@ -12,6 +12,8 @@ from typing import List, Tuple
 
 from datasets.mvs_maxieye import MaxieyeMVSDataset
 from models import PatchmatchNet, patchmatchnet_loss
+from models.module import generate_pointcloud
+from tools.visualize_utils import vis_points, write_ply
 from utils import *
 
 
@@ -101,6 +103,7 @@ def process_samples(
 
         loss, scalar_outputs, image_outputs = sample_function(model, sample, do_image_summary, optimizer)
 
+        # log
         if do_scalar_summary:
             save_scalars(logger, tag, scalar_outputs, global_step)
         if do_image_summary:
@@ -140,13 +143,13 @@ def process_sample(
 
     sample_cuda = to_cuda(sample)
 
-    #print(type(sample_cuda["images"]), sample_cuda["images"][0].shape,sample_cuda["images"][0].dtype)
-    print("depth_gt.shape", sample_cuda["depth_gt"].shape)
-    #print("depth_gt.mask", sample_cuda["mask"].shape)
+    # print(type(sample_cuda["images"]), sample_cuda["images"][0].shape,sample_cuda["images"][0].dtype)
+    # print("depth_gt.shape", sample_cuda["depth_gt"].shape)
+    # print("depth_gt.mask", sample_cuda["mask"].shape)
     # return None
 
     # 前向传播
-    _, _, depths = model(
+    test_depth, _, depths = model(
         sample_cuda["images"],  # List[Tensor], Tensor:[B, 3, H, W]
         sample_cuda["intrinsics"],  #
         sample_cuda["extrinsics"],  #
@@ -157,7 +160,7 @@ def process_sample(
     # print(type(depths))  # Dict
     # print(type(depths[0]))  # List
     # print(type(depths[0][0]))  # Tensor
-    #for key,value in depths.items():
+    # for key,value in depths.items():
     #    print("%d output,len:%d ,depths.shape:%s" % (key,len(depths[key]),depths[key][0].shape))  # [B,1,H,W]
     # depths : Dict{int, List[torch.Tensor]}
     # 3 output, len: 2, depths.shape: torch.Size([3, 1, 31, 60])
@@ -193,9 +196,20 @@ def process_sample(
             image_outputs[f"depth-stage-{i}"] = depths[i][-1] * mask[i]
             image_outputs[f"error-map-stage-{i}"] = (depths[i][-1] - depth_gt[i]).abs() * mask[i]
 
+            # 写入点云
+            xyz, rgb = generate_pointcloud(tensor2numpy(test_depth[0][0]),
+                                           tensor2numpy(sample["images"][0][0]),
+                                           tensor2numpy(sample["intrinsics"][0][0]))
+
+            file_path = sample["file_path"]
+            name = os.path.basename(file_path[0])
+
+            write_path = os.path.join("/home/cjq/data/mvs/temp", name + ".ply")
+            write_ply(write_path, xyz.transpose(), rgb)
+
     # iterate over thresholds
     for t in [1, 2, 4, 8]:
-        scalar_outputs[f"threshold-{t}mm-error"] = threshold_metrics(depths[0][-1], depth_gt[0], mask[0], float(t))
+        scalar_outputs[f"threshold-{t}m-error"] = threshold_metrics(depths[0][-1], depth_gt[0], mask[0], float(t))
 
     return tensor2float(loss), tensor2float(scalar_outputs), tensor2numpy(image_outputs)
 
@@ -226,15 +240,18 @@ if __name__ == "__main__":
     parser.add_argument("--input_folder", default="/home/cjq/data/mvs/kaijin", type=str, help="input data path")
     parser.add_argument("--input_lidar_folder", default="/home/cjq/data/mvs/lidar", type=str, help="input data path")
     parser.add_argument("--output_folder", type=str, default="/home/cjq/data/mvs/kaijin", help="output path")
-    parser.add_argument("--checkpoint_path", type=str, default="", help="load a specific checkpoint for parameters")
+    # parser.add_argument("--checkpoint_path", type=str, default="/home/cjq/PycharmProjects/MVS/PatchmatchNet/checkpoints",
+    #                    help="load a specific checkpoint for parameters")
+    parser.add_argument("--checkpoint_path", type=str, default="",
+                        help="load a specific checkpoint for parameters")
 
     # Dataset loading options
-    parser.add_argument("--num_views", type=int, default=5,
+    parser.add_argument("--num_views", type=int, default=7,
                         help="total views for each patch-match problem including reference")
     parser.add_argument("--image_max_dim", type=int, default=640, help="max image dimension")
     parser.add_argument("--train_list", type=str, help="training scan list text file")
     parser.add_argument("--test_list", type=str, help="validation scan list text file")
-    parser.add_argument("--batch_size", type=int, default=12, help="train batch size")
+    parser.add_argument("--batch_size", type=int, default=2, help="train batch size")
 
     # Training options
     parser.add_argument("--resume", action="store_true", default=False, help="continue to train the model")
@@ -268,9 +285,11 @@ if __name__ == "__main__":
     train_datasets = ['20221020_5.78km_2022-11-29-13-55-40',
                       "20221027_6.58km_2022-12-04-08-37-08",
                       "20221027_6.58km_2022-12-04-09-08-14",
-                      "20221027_6.58km_2022-12-04-11-38-23_part1",
+                      "20221027_6.58km_2022-12-04-11-38-23_part2",
+                      "20230216_2.11km_ZJ227_0301_4",
+                      "20230306_1.56km_ZJ245"
                       ]
-    test_datasets = ['20221027_6.58km_2022-12-04-11-38-23_part2', ]
+    test_datasets = ['20221027_6.58km_2022-12-04-11-38-23_part1', ]
 
     print("argv:", sys.argv[1:])
     print_args(input_args)
@@ -289,6 +308,7 @@ if __name__ == "__main__":
         num_views=input_args.num_views,
         max_dim=input_args.image_max_dim,
         scan_list=train_datasets,
+        camera_mask_path='/media/cjq/新加卷/datasets/220Dataset/GS4-2M.png'
     )
     test_dataset = MaxieyeMVSDataset(
         data_root=input_args.input_folder,
@@ -296,6 +316,7 @@ if __name__ == "__main__":
         num_views=input_args.num_views,
         max_dim=input_args.image_max_dim,
         scan_list=test_datasets,
+        camera_mask_path='/media/cjq/新加卷/datasets/220Dataset/GS4-2M.png'
     )
 
     train_loader = DataLoader(train_dataset, input_args.batch_size, shuffle=True, num_workers=8, drop_last=True)

@@ -65,91 +65,93 @@ def add_line(polygon_points, color=None):
     vis.add_geometry(lines_pcd)
     vis.add_geometry(points_pcd)
 
-#可视化坐标原点
-add_coordinate_frame(np.eye(4))
 
-# 地面平面
-radius = 20
-T_plane = np.eye(4)
-T_plane[0, 3] = -radius / 2.
-T_plane[1, 3] = -radius / 2.
-add_plane(T_plane, radius_plane=radius)
+if __name__=="__main__":
 
+    # 可视化坐标原点
+    add_coordinate_frame(np.eye(4))
 
-T_vc = np.array([[1.65671625e-02, -3.32327391e-02, 9.99310319e-01, 2.17537799e+00],
-             [9.99862347e-01, 3.52411779e-04, 1.65880340e-02, 2.80948292e-02],
-             [-9.03434534e-04, -9.99447578e-01, -3.32223260e-02, 1.33101139e+00],
-             [0.00000000e+00, 0.00000000e+00, 0.00000000e+00, 1.00000000e+00]], np.float32)
-T_cv = np.linalg.inv(T_vc)
+    # 地面平面
+    radius = 20
+    T_plane = np.eye(4)
+    T_plane[0, 3] = -radius / 2.
+    T_plane[1, 3] = -radius / 2.
+    add_plane(T_plane, radius_plane=radius)
 
-K = np.array([[758.5029907226562, 0.0, 886.4910888671875],
-              [0.0, 732.5841674804688, 275.8777770996094],
-              [0.0, 0.0, 1.0]],
-             np.float32)
-K_inv = np.linalg.inv(K)
+    T_vc = np.array([[1.65671625e-02, -3.32327391e-02, 9.99310319e-01, 2.17537799e+00],
+                     [9.99862347e-01, 3.52411779e-04, 1.65880340e-02, 2.80948292e-02],
+                     [-9.03434534e-04, -9.99447578e-01, -3.32223260e-02, 1.33101139e+00],
+                     [0.00000000e+00, 0.00000000e+00, 0.00000000e+00, 1.00000000e+00]], np.float32)
+    T_cv = np.linalg.inv(T_vc)
 
-# 可视化相机坐标轴
-add_coordinate_frame(T_vc)
+    K = np.array([[758.5029907226562, 0.0, 886.4910888671875],
+                  [0.0, 732.5841674804688, 275.8777770996094],
+                  [0.0, 0.0, 1.0]],
+                 np.float32)
+    K_inv = np.linalg.inv(K)
 
-#图像大小
-width = 1696
-height = 540
+    # 可视化相机坐标轴
+    add_coordinate_frame(T_vc)
 
-# 生成相机坐标系下的归一化坐标
-x_cam, y_cam = np.meshgrid(np.arange(0, width), np.arange(0, height))
-x_cam, y_cam = x_cam.reshape(-1), y_cam.reshape(-1)
-p_cam_pixel = np.vstack([x_cam, y_cam, np.ones([1, width * height], dtype=np.float32)])  # [3, H*W]
-p_cam_norm = np.matmul(K_inv, p_cam_pixel)  # [3, H*W]
-p_cam_norm_h = np.vstack([p_cam_norm, np.ones_like(x_cam)])  # [4, H*W]
-# 变换到car坐标系
-p_car_norm = np.matmul(T_vc, p_cam_norm_h)[:3, :]  # [3,H*W]
+    # 图像大小
+    width = 1696
+    height = 540
 
-add_points(p_car_norm)
+    # 生成相机坐标系下的归一化坐标
+    x_cam, y_cam = np.meshgrid(np.arange(0, width), np.arange(0, height))
+    x_cam, y_cam = x_cam.reshape(-1), y_cam.reshape(-1)
+    p_cam_pixel = np.vstack([x_cam, y_cam, np.ones([1, width * height], dtype=np.float32)])  # [3, H*W]
+    p_cam_norm = np.matmul(K_inv, p_cam_pixel)  # [3, H*W]
+    p_cam_norm_h = np.vstack([p_cam_norm, np.ones_like(x_cam)])  # [4, H*W]
+    # 变换到car坐标系
+    p_car_norm = np.matmul(T_vc, p_cam_norm_h)[:3, :]  # [3,H*W]
 
-# 相机光心
-O_car_cam = (T_vc[:3, 3]).reshape([3, 1])  # [3,1]
-# 计算射线的方向向量
-v_car = p_car_norm - O_car_cam
-v_car = v_car / np.linalg.norm(v_car, ord=2, axis=0)  # 归一化
+    add_points(p_car_norm)
 
-# 平面法向量
-N_plane = np.array([0, 0, 1], np.float32).reshape([3, 1])
-# 计算k
-temp_1 = np.dot(N_plane.transpose(), -O_car_cam)
-k = temp_1 / np.matmul(v_car.transpose(), N_plane)  # [H*W,1]
-# 计算射线和平面的交点
-p_car_inter = O_car_cam + np.squeeze(k, axis=1) * v_car  # [3,H*W]
-# 将点变换到相机坐标系
-p_cam_inter = np.matmul(T_cv, np.vstack([p_car_inter, np.ones([1, width * height])]))[:3, :]  # [4,H*W]
+    # 相机光心
+    O_car_cam = (T_vc[:3, 3]).reshape([3, 1])  # [3,1]
+    # 计算射线的方向向量
+    v_car = p_car_norm - O_car_cam
+    v_car = v_car / np.linalg.norm(v_car, ord=2, axis=0)  # 归一化
 
-#####可视化
+    # 平面法向量
+    N_plane = np.array([0, 0, 1], np.float32).reshape([3, 1])
+    # 计算k
+    temp_1 = np.dot(N_plane.transpose(), -O_car_cam)
+    k = temp_1 / np.matmul(v_car.transpose(), N_plane)  # [H*W,1]
+    # 计算射线和平面的交点
+    p_car_inter = O_car_cam + np.squeeze(k, axis=1) * v_car  # [3,H*W]
+    # 将点变换到相机坐标系
+    p_cam_inter = np.matmul(T_cv, np.vstack([p_car_inter, np.ones([1, width * height])]))[:3, :]  # [4,H*W]
 
-# 可视化相机到归一化平面的射线
-for i in range(0, width * height, 1000):
-    line_0 = np.hstack([O_car_cam, p_car_norm[:, i].reshape([3, 1])])
-    add_line(line_0.transpose())
+    #####可视化
 
-# 可视化相机到地面的射线
-for i in range(0, width * height, 1000):
-    if k[i, 0] <= 0:  # 表明无交点
-        continue
-    p1 = p_car_inter[:, i].reshape([3, 1])
-    dist = np.linalg.norm(O_car_cam - p1)
-    if dist > 20:
-        continue
-    line_0 = np.hstack([O_car_cam, p1])
-    add_line(line_0.transpose(), color=[1, 1, 1])
+    # 可视化相机到归一化平面的射线
+    for i in range(0, width * height, 1000):
+        line_0 = np.hstack([O_car_cam, p_car_norm[:, i].reshape([3, 1])])
+        add_line(line_0.transpose())
 
-# 获得深度
-depth = p_cam_inter[2]  # [1,H*W]
-print(depth.shape)
-depth = depth.reshape([height,width])
+    # 可视化相机到地面的射线
+    for i in range(0, width * height, 1000):
+        if k[i, 0] <= 0:  # 表明无交点
+            continue
+        p1 = p_car_inter[:, i].reshape([3, 1])
+        dist = np.linalg.norm(O_car_cam - p1)
+        if dist > 20:
+            continue
+        line_0 = np.hstack([O_car_cam, p1])
+        add_line(line_0.transpose(), color=[1, 1, 1])
 
-print(depth.max())
-print(depth.min())
-print(depth[depth>0].min())
+    # 获得深度
+    depth = p_cam_inter[2]  # [1,H*W]
+    print(depth.shape)
+    depth = depth.reshape([height, width])
 
-print(depth)
+    print(depth.max())
+    print(depth.min())
+    print(depth[depth > 0].min())
 
-vis.run()
-vis.destroy_window()
+    print(depth)
+
+    vis.run()
+    vis.destroy_window()

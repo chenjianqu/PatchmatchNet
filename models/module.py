@@ -391,3 +391,31 @@ def grid_plane_fit(depth, mask, K):
             d = d_new.reshape(batch_size, grid_size, grid_size)  # [B,S,S]
             mask_depth = mask_roi.reshape(batch_size, grid_size, grid_size)
             (depth[:, :, start_y:end_y, start_x:end_x])[mask_depth.unsqueeze(1)] = d[mask_depth]
+
+
+def generate_pointcloud(depth_image: np.ndarray, rgb_image: np.ndarray, K: np.ndarray):
+    """
+    从深度图中生成点云
+    Args:
+        K: [3,3]相机内参
+        depth_image:深度图 [H,W]
+        rgb_image:彩色图 [3,H,W] 或 [H,W,3]
+    Returns: 点云数组xyz [3,H*W]，颜色数组rgb [H*W,3]
+    """
+    H, W = depth_image.shape
+    K_inv = np.linalg.inv(K)
+
+    zz = depth_image.reshape([-1])  # N
+
+    xx, yy = np.meshgrid(np.arange(0, W), np.arange(0, H))
+    xx, yy = xx.reshape(-1), yy.reshape(-1)
+    xyd_pixel = np.vstack([xx, yy, np.ones([1, H * W], dtype=np.float32)]) * zz  # [3, H*W]
+    xyz = np.matmul(K_inv, xyd_pixel)  # [3, H*W]
+
+    if rgb_image.shape[0] == 3:
+        rgb_image = rgb_image.transpose(1, 2, 0)
+
+    # 此时 rgb_image：[H,W,3]
+    rgb = rgb_image.reshape([-1, 3])
+
+    return xyz, rgb
