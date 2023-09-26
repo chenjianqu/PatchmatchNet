@@ -393,10 +393,11 @@ def grid_plane_fit(depth, mask, K):
             (depth[:, :, start_y:end_y, start_x:end_x])[mask_depth.unsqueeze(1)] = d[mask_depth]
 
 
-def generate_pointcloud(depth_image: np.ndarray, rgb_image: np.ndarray, K: np.ndarray):
+def generate_pointcloud(depth_image: np.ndarray, rgb_image: np.ndarray, K: np.ndarray, mask: np.ndarray = None):
     """
     从深度图中生成点云
     Args:
+        mask: [H,W] mask
         K: [3,3]相机内参
         depth_image:深度图 [H,W]
         rgb_image:彩色图 [3,H,W] 或 [H,W,3]
@@ -418,4 +419,29 @@ def generate_pointcloud(depth_image: np.ndarray, rgb_image: np.ndarray, K: np.nd
     # 此时 rgb_image：[H,W,3]
     rgb = rgb_image.reshape([-1, 3])
 
+    if mask is not None:
+        mask_vec = mask.reshape([-1])  # N
+        rgb = rgb[mask_vec, :]
+        xyz = xyz[:, mask_vec]
+
     return xyz, rgb
+
+
+def project_to_pixel(T_cw: np.ndarray, K: np.ndarray, xyz_Pw: np.ndarray):
+    """
+    将点从坐标系w，变换到像素坐标系
+    Args:
+        T_cw: 外参矩阵 [4,4]
+        K: 内参矩阵 [3,3]
+        xyz_Pw: 点集合 [3,N]
+    Returns: xy：[2,N]像素坐标（np.int16），depth:[N]深度值（np.float32）
+
+    """
+    xyz_ci = T_cw[:3, :3].dot(xyz_Pw) + np.expand_dims(T_cw[:3, 3], axis=1)  # [3,N]
+    xyd = K.dot(xyz_ci)  # [3,N]
+    depth = xyd[2, :]  # [N]
+    xy = (xyd / depth)[:2]  # [2,N]
+    xy = xy.astype(np.int16)
+    return xy, depth
+
+

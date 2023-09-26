@@ -11,7 +11,7 @@ from plyfile import PlyData, PlyElement
 from typing import Tuple
 from torch.utils.data import DataLoader
 
-from datasets.data_io import read_cam_file, read_image, read_map, read_pair_file, save_image, save_map
+from datasets.data_io import read_cam_file, read_image, read_map, read_pair_file, save_image, save_map, read_binary_mask
 from datasets.mvs_colmap import ColmapMVSDataset
 from models.module import generate_pointcloud
 from models.net import PatchmatchNet
@@ -77,8 +77,9 @@ def save_depth(args):
             print("Iter {}/{}, time = {:.3f}".format(batch_idx + 1, len(image_loader), time.time() - start_time))
             filenames = sample["filename"]
 
-            xyz, rgb = generate_pointcloud(depth[0][0], tensor2numpy(sample["images"][0][0]), tensor2numpy(sample["intrinsics"][0][0]))
-            vis_points([xyz.transpose()], [rgb])
+            # 点云可视化
+            # xyz, rgb = generate_pointcloud(depth[0][0], tensor2numpy(sample["images"][0][0]), tensor2numpy(sample["intrinsics"][0][0]))
+            # vis_points([xyz.transpose()], [rgb])
 
             # visualize_utils.visualize_depth(None,depth,sample["intrinsics"][0],confidence)
 
@@ -221,11 +222,15 @@ def filter_depth(args, scan: str = ""):
         # load the reference image
         ref_img, original_h, original_w = read_image(
             os.path.join(args.input_folder, scan, "images/{:0>8}.jpg".format(ref_view)), args.image_max_dim)
+
+        ref_img_h = ref_img.shape[0]
+        ref_img_w = ref_img.shape[1]
+
         # load the camera parameters
         ref_intrinsics, ref_extrinsics = read_cam_file(
             os.path.join(args.input_folder, scan, "cams/{:0>8}_cam.txt".format(ref_view)))[0:2]
-        ref_intrinsics[0] *= ref_img.shape[1] / original_w
-        ref_intrinsics[1] *= ref_img.shape[0] / original_h
+        ref_intrinsics[0] *= ref_img_w / original_w
+        ref_intrinsics[1] *= ref_img_h / original_h
 
         # load the estimated depth of the reference view
         ref_depth_est = read_map(
@@ -240,10 +245,8 @@ def filter_depth(args, scan: str = ""):
         # 语义mask,读取并转换为二值图像
         semantic_mask = None
         if args.use_road_mask:
-            mask_image_raw = Image.open(
-                os.path.join(args.input_folder, scan, "road_mask/{:0>8}.jpg".format(ref_view))).convert('L')
-            semantic_mask = np.array(mask_image_raw, dtype=np.int32)
-            semantic_mask = semantic_mask > 0
+            read_path = os.path.join(args.input_folder, scan, "road_mask/{:0>8}.jpg".format(ref_view))
+            semantic_mask = read_binary_mask(read_path, img_size=(ref_img_w, ref_img_h))
 
         all_src_view_depth_estimates = []
 
@@ -348,7 +351,7 @@ if __name__ == "__main__":
     # Dataset loading options
     parser.add_argument("--num_views", type=int, default=20,
                         help="number of source views for each patch-match problem")
-    parser.add_argument("--image_max_dim", type=int, default=-1, help="max image dimension")
+    parser.add_argument("--image_max_dim", type=int, default=640, help="max image dimension")
     parser.add_argument("--scan_list", type=str, default="",
                         help="Optional scan list text file to identify input folders")
     parser.add_argument("--num_light_idx", type=int, default=-1, help="Number of light indexes in source images")
@@ -372,7 +375,7 @@ if __name__ == "__main__":
 
     # Stereo fusion options
     parser.add_argument("--display", action="store_true", default=False, help="display depth images and masks")
-    parser.add_argument("--use_road_mask", action="store_true", default=False, help="display depth images and masks")
+    parser.add_argument("--use_road_mask", action="store_true", default=True, help="display depth images and masks")
 
     parser.add_argument("--geo_pixel_thres", type=float, default=1.0,
                         help="pixel threshold for geometric consistency filtering")

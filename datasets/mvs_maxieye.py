@@ -14,7 +14,7 @@ from datasets.data_io import read_cam_file, read_image, read_pair_file, scale_to
 from torch.utils.data import Dataset, DataLoader
 from typing import List, Tuple, Dict
 
-from models.module import generate_pointcloud
+from models.module import generate_pointcloud, project_to_pixel
 from tools.colmap_utils import read_model_get_points
 from tools.pose_utils import convert_rvector_to_pose_mat, convert_rollyawpitch_to_rot, convert_quat_to_pose_mat
 from tools.visualize_utils import vis_points, write_ply
@@ -46,23 +46,6 @@ def get_data_param(path_idxs, is_train=True):
     return param_infos_list, data_infos_list, image_paths_list, idxs
 
 
-def project_to_pixel(T_cw: np.ndarray, K: np.ndarray, xyz_Pw: np.ndarray):
-    '''
-    将点从坐标系w，变换到像素坐标系
-    Args:
-        T_cw: 外参矩阵 [4,4]
-        K: 内参矩阵 [3,3]
-        xyz_Pw: 点集合 [3,N]
-    Returns: xy：[2,N]像素坐标（np.int16），depth:[N]深度值（np.float32）
-
-    '''
-    xyz_ci = T_cw[:3, :3].dot(xyz_Pw) + np.expand_dims(T_cw[:3, 3], axis=1)  # [3,N]
-    xyd = K.dot(xyz_ci)  # [3,N]
-    depth = xyd[2, :]  # [N]
-    xy = (xyd / depth)[:2]  # [2,N]
-    xy = xy.astype(np.int16)
-    return xy, depth
-
 
 def read_semantic_mask(mask_path: str, semantic_value: List[int] = None, dilate_size: int = -1,
                        img_size: Tuple[int, int] = (),
@@ -84,9 +67,11 @@ def read_semantic_mask(mask_path: str, semantic_value: List[int] = None, dilate_
     if semantic_value is None:
         semantic_value = [20]
 
-    mask_img = cv2.imread(mask_path, -1)
-
-    if mask_img is None:
+    mask_img = None
+    if os.path.exists(mask_path):
+        mask_img = cv2.imread(mask_path, -1)
+    else:
+        print(f"{mask_path} not exists!")
         mask_img = np.ones((img_size[1],img_size[0]),dtype=bool)
         return mask_img
 
@@ -138,6 +123,7 @@ class MaxieyeMVSDataset(Dataset):
             vis_sample: bool = False,  # 是否可视化图像
             use_srcs_pointcloud=True,  # 是否使用多帧点云叠在一起
             camera_mask_path = '',
+            depth_path='',# 深度图所在的目录
     ) -> None:
         super(MaxieyeMVSDataset, self).__init__()
 
@@ -153,9 +139,20 @@ class MaxieyeMVSDataset(Dataset):
         self.colmap_intrinsic: Dict[int, np.ndarray] = {}
         self.colmap_extrinsic: Dict[str, np.ndarray] = {}
         self.colmap_images_points: Dict[str, List[np.ndarray]] = {}
+        self.depth_path = depth_path
 
-        self.train_list = [data_root + '/' + dataset for dataset in scan_list]
-        self.train_lidar_list = [lidar_data_root + '/' + dataset for dataset in scan_list]
+        train_list = [data_root + '/' + dataset for dataset in scan_list]
+        train_lidar_list = [lidar_data_root + '/' + dataset for dataset in scan_list]
+        self.train_list = []
+        self.train_lidar_list = []
+
+        # 删掉不存在的路径
+        for i,dataset in enumerate(train_list):
+            if os.path.exists(dataset):
+                self.train_list.append(dataset)
+                self.train_lidar_list.append(train_lidar_list[i])
+            else:
+                print(f"{dataset} not exists!")
 
         param_infos_list, data_infos_list, self.image_paths_list, self.data_idxs = get_data_param(self.train_list)
 
@@ -289,7 +286,7 @@ class MaxieyeMVSDataset(Dataset):
         self.idx_map[ref_idx] = image_path
 
         # 输出到txt
-        f = open(os.path.join(self.data_root,"pair.txt"),'a')
+        f = open("pair.txt",'a')
         f.write(str(ref_idx)+'\n')
         f.write(str(len(srcs_idx_list))+" ")
 
@@ -316,7 +313,7 @@ class MaxieyeMVSDataset(Dataset):
 
     def write_idx_map(self,write_name="map.txt"):
         with open(os.path.join(self.data_root,write_name), 'w') as write_f:
-            write_f.write(json.dumps(self.idx_map, indent=4, ensure_ascii=False))
+            write_f.write(json.dumps(self.idx_map, indent=4))
 
     def __getitem__(self, idx):
         sce_id, sce_id_ind = self.data_idxs[idx]  # 获得bag索引和图像索引
@@ -375,7 +372,7 @@ class MaxieyeMVSDataset(Dataset):
         depth_img = np.empty(0)  # 深度图像
 
         ref_image_path, _ = self.ixes[sce_name][0][sce_id_ind]
-        ref_depth_path = os.path.join(self.train_lidar_list[sce_id], "depths", Path(ref_image_path).stem + ".png")
+        ref_depth_path = os.path.join(self.depth_path,self.train_lidar_list[sce_id], Path(ref_image_path).stem + ".png")
 
         if not self.regenerate_depth_image and os.path.exists(ref_depth_path):
             depth_img = cv2.imread(ref_depth_path, -1)
@@ -394,23 +391,27 @@ class MaxieyeMVSDataset(Dataset):
                 T_l0li = np.linalg.inv(T_wl0).dot(T_wli)  # 从lidar_i到lidar_0的相对变换
                 Ki = intrinsics_list[i]  # 源视图的内参
 
-                # 读取点云
-                timestamp = Path(image_path).stem + ".npy"
-                point_path = os.path.join(self.train_lidar_list[sce_id], "depths_single_with_obj_time_ori", timestamp)
-                points = np.load(point_path)  # [N,5]
-                xyz_li = points[:, :3]  # [N,3]
-                xyz_li = xyz_li.T  # [3,N]
-
                 # 读取语义mask
                 timestamp = Path(image_path).stem + ".png"
                 mask_path = os.path.join(self.train_lidar_list[sce_id], "semantic_maps_ori", timestamp)
                 semantic_mask_img = read_semantic_mask(mask_path, img_size=(W, H), maps=(un_map1, un_map2),
                                                        dilate_size=15, semantic_value=[20],
                                                        camera_mask=self.camera_mask)
-
                 if i == 0:
                     ref_semantic_mask = semantic_mask_img
-                else:  # 根据语义分割的mask，去除动态物体
+
+                # 读取点云
+                timestamp = Path(image_path).stem + ".npy"
+                point_path = os.path.join(self.train_lidar_list[sce_id], "depths_single_with_obj_time_ori", timestamp)
+                if not os.path.exists(point_path):
+                    print(f"{point_path} not exists!")
+                    continue
+
+                points = np.load(point_path)  # [N,5]
+                xyz_li = points[:, :3]  # [N,3]
+                xyz_li = xyz_li.T  # [3,N]
+
+                if i != 0: # 根据语义分割的mask，去除动态物体
                     xy, depth = project_to_pixel(T_cl, Ki, xyz_li)  # 首先将点投影到相机坐标系i
 
                     # 处于图像之外的点
@@ -503,7 +504,7 @@ if __name__ == "__main__":
 
     dataloader = MaxieyeMVSDataset(data_root, lidar_data_root,
                                    num_views=7,
-                                   max_dim=800,
+                                   max_dim=640,
                                    scan_list=train_datasets,
                                    vis_sample=True,
                                    use_srcs_pointcloud=True,
@@ -533,7 +534,7 @@ if __name__ == "__main__":
             break
 
         # print(type(ref_image))
-        # print(ref_image.shape)
+        print(ref_image.shape)
         # print(type(depth_image))
         # print(depth_image.shape)
 

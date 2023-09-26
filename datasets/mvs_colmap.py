@@ -4,7 +4,7 @@ import random
 
 from PIL import Image
 
-from datasets.data_io import read_cam_file, read_image, read_pair_file
+from datasets.data_io import read_cam_file, read_image, read_pair_file, read_binary_mask
 from torch.utils.data import Dataset
 from typing import List, Tuple, Dict
 from tools.colmap_utils import read_model_get_points
@@ -62,7 +62,7 @@ class ColmapMVSDataset(Dataset):
                 self.metas += [(scan, light_idx, ref, src) for ref, src in pair_data]
 
         if self.colmap_folder != '':
-            self.name_map:Dict[str,str] = {}
+            self.name_map: Dict[str, str] = {}
             with open(os.path.join(self.colmap_folder, 'name_map.txt')) as f:
                 for line in f.readlines():
                     idx, name = line.rstrip().split()
@@ -100,6 +100,8 @@ class ColmapMVSDataset(Dataset):
 
             image, original_h, original_w = read_image(img_filename, self.max_dim)
             # image, original_h, original_w = read_image_set_mask(img_filename, self.max_dim)
+            curr_img_h = image.shape[0]
+            curr_img_w = image.shape[1]
             images.append(image.transpose([2, 0, 1]))
 
             cam_filename = os.path.join(self.data_path, scan, self.cam_folder, "{:0>8}_cam.txt".format(view_id))
@@ -125,16 +127,13 @@ class ColmapMVSDataset(Dataset):
                     mask_filename = os.path.join(
                         self.data_path, scan, self.mask_folder, light_idx,
                         "{:0>8}{}".format(view_id, self.image_extension))
-
-                    mask_image_raw = Image.open(mask_filename).convert('L')
-                    semantic_mask = np.array(mask_image_raw, dtype=np.int32)
-                    mask = semantic_mask > 0
+                    mask = read_binary_mask(mask_filename, img_size=(curr_img_w, curr_img_h))
                     mask = mask.astype(np.float32)
 
                 if self.colmap_images_points:
                     name = self.name_map[str(view_id)]
                     prior_points = np.array(self.colmap_images_points[name]).astype(np.float32)  # 得到[N,3]
-                    prior_points = prior_points.transpose() #[3,N]
+                    prior_points = prior_points.transpose()  # [3,N]
 
         intrinsics = np.stack(intrinsics)
         extrinsics = np.stack(extrinsics)

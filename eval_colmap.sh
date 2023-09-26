@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
-CHECKPOINT_FILE="./checkpoints/params_000007.ckpt"
+#CHECKPOINT_FILE="./checkpoints/params_000007.ckpt"
+CHECKPOINT_FILE="/home/cjq/data/mvs/kaijin/params_000015.ckpt"
 
 # -------------------------------------------------------------------------------------
 
@@ -19,7 +20,7 @@ python eval_colmap.py --input_folder=$CUSTOM_TESTING \
 --output_folder=$CUSTOM_TESTING \
 --checkpoint_path $CHECKPOINT_FILE \
 --num_views 5 \
---image_max_dim 2048 \
+--image_max_dim 640 \
 --geo_mask_thres 3 \
 --geo_depth_thres 0.1 \
 --photo_thres 0.5 \

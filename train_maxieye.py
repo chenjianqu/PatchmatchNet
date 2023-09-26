@@ -101,7 +101,7 @@ def process_samples(
         do_scalar_summary = global_step % args.summary_freq == 0
         do_image_summary = global_step % (50 * args.summary_freq) == 0
 
-        loss, scalar_outputs, image_outputs = sample_function(model, sample, do_image_summary, optimizer)
+        loss, scalar_outputs, image_outputs = sample_function(args, model, sample, do_image_summary, optimizer)
 
         # log
         if do_scalar_summary:
@@ -119,22 +119,22 @@ def process_samples(
         print("avg_test_scalars:", avg_test_scalars.mean())
 
 
-def train_sample(
-        model: PatchmatchNet, sample: Dict, image_summary: bool, optimizer: Optimizer
-) -> Tuple[float, Dict[str, float], Dict[str, np.ndarray]]:
-    return process_sample(model, sample, True, image_summary, optimizer)
+def train_sample(args,
+                 model: PatchmatchNet, sample: Dict, image_summary: bool, optimizer: Optimizer
+                 ) -> Tuple[float, Dict[str, float], Dict[str, np.ndarray]]:
+    return process_sample(args, model, sample, True, image_summary, optimizer)
 
 
 @make_nograd_func
-def test_sample(
-        model: PatchmatchNet, sample: Dict, image_summary: bool = False, optimizer: Optimizer = None
-) -> Tuple[float, Dict[str, float], Dict[str, np.ndarray]]:
-    return process_sample(model, sample, False, image_summary, optimizer)
+def test_sample(args,
+                model: PatchmatchNet, sample: Dict, image_summary: bool = False, optimizer: Optimizer = None
+                ) -> Tuple[float, Dict[str, float], Dict[str, np.ndarray]]:
+    return process_sample(args, model, sample, False, image_summary, optimizer)
 
 
-def process_sample(
-        model: PatchmatchNet, sample: Dict, is_training: bool, image_summary: bool, optimizer: Optimizer
-) -> Tuple[float, Dict[str, float], Dict[str, np.ndarray]]:
+def process_sample(args,
+                   model: PatchmatchNet, sample: Dict, is_training: bool, image_summary: bool, optimizer: Optimizer
+                   ) -> Tuple[float, Dict[str, float], Dict[str, np.ndarray]]:
     if is_training:
         model.train()
         optimizer.zero_grad()
@@ -170,7 +170,9 @@ def process_sample(
 
     # 获得真值
     depth_gt = create_stage_images(sample_cuda["depth_gt"])
-    mask = [m.bool() for m in create_stage_images(sample_cuda["mask"].float())]
+    # mask = [m.bool() for m in create_stage_images(sample_cuda["mask"].float())]
+    mask = [m > sample["depth_min"][0] for m in depth_gt]
+
     # sample_cuda["depth_gt"] # [B, 3, H, W]
     # sample_cuda["mask"] # [B, 3, H, W]
 
@@ -204,7 +206,8 @@ def process_sample(
             file_path = sample["file_path"]
             name = os.path.basename(file_path[0])
 
-            write_path = os.path.join("/home/cjq/data/mvs/temp", name + ".ply")
+            out_pointcloud_path = os.path.join(args.output_folder, "pointcloud")
+            write_path = os.path.join(out_pointcloud_path, name + ".ply")
             write_ply(write_path, xyz.transpose(), rgb)
 
     # iterate over thresholds
@@ -237,18 +240,25 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="PatchMatchNet for high-resolution multi-view stereo")
     parser.add_argument("--mode", type=str, default="train", help="Execution mode", choices=["train", "test"])
-    parser.add_argument("--input_folder", default="/home/cjq/data/mvs/kaijin", type=str, help="input data path")
-    parser.add_argument("--input_lidar_folder", default="/home/cjq/data/mvs/lidar", type=str, help="input data path")
-    parser.add_argument("--output_folder", type=str, default="/home/cjq/data/mvs/kaijin", help="output path")
-    # parser.add_argument("--checkpoint_path", type=str, default="/home/cjq/PycharmProjects/MVS/PatchmatchNet/checkpoints",
-    #                    help="load a specific checkpoint for parameters")
+
+    # parser.add_argument("--input_folder", default="/home/cjq/data/mvs/kaijin", type=str, help="input data path")
+    parser.add_argument("--input_folder", default="/defaultShare/aishare/share",
+                        type=str, help="input data path")
+    # parser.add_argument("--input_lidar_folder", default="/home/cjq/data/mvs/lidar", type=str, help="input data path")
+    parser.add_argument("--input_lidar_folder", default="/defaultShare/aishare/share/occ_data/occ_data_ori",
+                        type=str, help="input data path")
+    # parser.add_argument("--output_folder", type=str, default="/home/cjq/data/mvs/output", help="output path")
+    parser.add_argument("--output_folder", type=str, default="/jikaijin/mvs/data/train_output", help="output path")
+    # parser.add_argument("--checkpoint_path", type=str,
+    # default="/home/cjq/PycharmProjects/MVS/PatchmatchNet/checkpoints", help="load a specific checkpoint for
+    # parameters")
     parser.add_argument("--checkpoint_path", type=str, default="",
                         help="load a specific checkpoint for parameters")
 
     # Dataset loading options
     parser.add_argument("--num_views", type=int, default=7,
                         help="total views for each patch-match problem including reference")
-    parser.add_argument("--image_max_dim", type=int, default=640, help="max image dimension")
+    parser.add_argument("--image_max_dim", type=int, default=1200, help="max image dimension")
     parser.add_argument("--train_list", type=str, help="training scan list text file")
     parser.add_argument("--test_list", type=str, help="validation scan list text file")
     parser.add_argument("--batch_size", type=int, default=2, help="train batch size")
@@ -282,14 +292,141 @@ if __name__ == "__main__":
     # parse arguments and check
     input_args = parser.parse_args()
 
-    train_datasets = ['20221020_5.78km_2022-11-29-13-55-40',
-                      "20221027_6.58km_2022-12-04-08-37-08",
-                      "20221027_6.58km_2022-12-04-09-08-14",
-                      "20221027_6.58km_2022-12-04-11-38-23_part2",
-                      "20230216_2.11km_ZJ227_0301_4",
-                      "20230306_1.56km_ZJ245"
-                      ]
-    test_datasets = ['20221027_6.58km_2022-12-04-11-38-23_part1', ]
+    # train_datasets = [
+    #     'bev_gnd/20220919_81km/20220920_1km_done',
+    #     'bev_gnd/20220919_81km/20220923_3km_done',
+    #     'bev_gnd/20220919_81km/20220926_6.29km_done',
+    #     'bev_gnd/20220919_81km/20220927_5.15km',
+    #     'bev_gnd/20220919_81km/20220928_6.02km_done',
+    #     'bev_gnd/20220919_81km/20220929_5.65km_2_done',
+    #     'bev_gnd/20220919_81km/20220929_5.65km_done',
+    #     'bev_gnd/20220919_81km/20220930_3km_done',
+    #     'bev_gnd/20220919_81km/20221008_6.7km_done',
+    #     'bev_gnd/20220919_81km/20221009_5.96km',
+    #     'bev_gnd/20220919_81km/20221009_5.96km_2',
+    #     'bev_gnd/20220919_81km/20221010_6.52km_done',
+    #     'bev_gnd/20220919_81km/20221011_5.75km_done',
+    #     'bev_gnd/20220919_81km/20221012_4.87km_done',
+    #     'bev_gnd/20220919_81km/20221013_4.28km_done',
+    #     'bev_gnd/20220919_81km/20221014_4.84km_1_done',
+    #     'bev_gnd/20220919_81km/20221014_4.84km_2',
+    #     'bev_gnd/20220919_81km/20221017_6.22km_done',
+    #     'bev_gnd/20220919_81km/20221018_5.16km_done',
+    #     'bev_gnd/20221018_13km/20221020_5.78km_ZJ002',
+    #     'bev_gnd/20221018_13km/20221021_5.98km_ZJ001',
+    #     'bev_gnd/20221020_50km/20221024_5.91km_ZJ003',
+    #     'bev_gnd/20221020_50km/20221025_5.43km_ZJ004',
+    #     'bev_gnd/20221020_50km/20221026_6.78km_ZJ006',
+    #     'bev_gnd/20221020_50km/20221027_6.58km_ZJ007',
+    #     'bev_gnd/20221020_50km/20221028_6.25km_ZJ009',
+    #     'bev_gnd/20221020_50km/20221031_2.94km_ZJ008',
+    #     'bev_gnd/20221020_50km/20221031_2.9km_ZJ024',
+    #     'bev_gnd/20221020_50km/20221031_5.62km_ZJ010',
+    #     'bev_gnd/20221024_70km/20221101_6.22km_ZJ012',
+    #     'bev_gnd/20221024_70km/20221102_6.27km_ZJ013',
+    #     'bev_gnd/20221024_70km/20221107_6.04km_ZJ017',
+    #     'bev_gnd/20221024_70km/20221107_6.21km_ZJ018',
+    #     'bev_gnd/20221024_70km/20221108_5.90km_ZJ019',
+    #     'bev_gnd/20221024_70km/20221109_1.67km_ZJ027',
+    #     'bev_gnd/20221024_70km/20221109_2.26km_ZJ026',
+    #     'bev_gnd/20221024_70km/20221110_1.75km_ZJ028',
+    #     'bev_gnd/20221024_70km/20221110_6.00km_ZJ021',
+    #     'bev_gnd/20221024_70km/20221114_5.45km_ZJ022',
+    #     'bev_gnd/20221102_93km/20221109_5.25km_ZJ029',
+    #     'bev_gnd/20221102_93km/20221109_6.67km_ZJ037',
+    #     'bev_gnd/20221102_93km/20221110_6.35km_ZJ031',
+    #     'bev_gnd/20221102_93km/20221111_3.14km_ZJ035',
+    #     'bev_gnd/20221102_93km/20221111_6.58km_ZJ033',
+    #     'bev_gnd/20221102_93km/20221111_6.77km_ZJ038',
+    #     'bev_gnd/20221102_93km/20221114_6.33km_ZJ032',
+    #     'bev_gnd/20221102_93km/20221115_6.43km_ZJ034',
+    #     'bev_gnd/20221102_93km/20221115_6.45km_ZJ030',
+    #     'bev_gnd/20221102_93km/20221118_3.19km_ZJ036',
+    # ]
+    #
+    # test_datasets = [
+    #     'bev_gnd/20220919_81km/20221018_5.16km_done',
+    #     'bev_gnd/20221018_13km/20221109_1.90km_ZJ025',
+    #     'bev_gnd/20221020_50km/20221114_4.11km_ZJ005',
+    #     'bev_gnd/20221024_70km/20221115_2.86km_ZJ023',
+    #     'bev_gnd/20221102_93km/20221118_6.58km_ZJ039',
+    # ]
+
+    train_datasets = [
+        'bev_gnd_fucai/20221116_80km/20221202_6.98km_1119_1',
+        'bev_gnd_fucai/20221018_13km/20221020_5.78km_2022-10-25-11-42-01',
+        'bev_gnd_fucai/20221018_13km/20221020_5.78km_2022-10-22-15-40-43-part2',
+        'bev_gnd_fucai/20221018_13km/20221020_5.78km_2022-10-24-15-52-11',
+        'bev_gnd_fucai/20221018_13km/20221021_5.98km_2022-10-22-15-30-39',
+        'bev_gnd_fucai/20221018_13km/20221020_5.78km_2022-10-27-13-23-31',
+        'bev_gnd_fucai/20230224_20km/20230307_4.08km_ZJ247_part1_0331_1_A12',
+        'bev_gnd_fucai/20230224_20km/20230306_2.44km_ZJ246_0224_1',
+        'bev_gnd_fucai/20230224_20km/20230307_4.08km_ZJ247_part1_0224_2',
+        'bev_gnd_fucai/20230224_20km/20230307_4.08km_ZJ247_part1_0217_1',
+        'bev_gnd_fucai/20230224_20km/20230307_4.08km_ZJ247_part1_0402_0_A12_part2',
+        'bev_gnd_fucai/20230224_20km/20230308_4.45km_ZJ249_0319_6_A12',
+        'bev_gnd_fucai/20230224_20km/20230306_1.56km_ZJ245_0402_2_A12',
+        'bev_gnd_fucai/20230224_20km/20230307_4.08km_ZJ247_part1_0217_6',
+        'bev_gnd_fucai/20230224_20km/20230306_1.56km_ZJ245_0413_3_A12',
+        'bev_gnd_fucai/20230224_20km/20230307_4.08km_ZJ247_part1_0224_3',
+        'bev_gnd_fucai/20230224_20km/20230308_0.66km_ZJ251_0337_1_A12',
+        'bev_gnd_fucai/20230224_20km/20230308_0.66km_ZJ251_0404_1_A12',
+        'bev_gnd_fucai/20230224_20km/20230307_4.41km_ZJ248_0217_6',
+        'bev_gnd_fucai/20230224_20km/20230306_1.56km_ZJ245_0413_1_A12',
+        'bev_gnd_fucai/20230224_20km/20230306_1.56km_ZJ245_0402_1_A12',
+        'bev_gnd_fucai/20230224_20km/20230306_1.56km_ZJ245_0327_3_A12',
+        'bev_gnd_fucai/20230224_20km/20230309_4.40km_ZJ250_0402_3_A12',
+        'bev_gnd_fucai/20230224_20km/20230309_4.40km_ZJ250_0402_5_A12',
+        'bev_gnd_fucai/20230224_20km/20230308_0.66km_ZJ251_0402_6_A12',
+        'bev_gnd_fucai/20230224_20km/20230306_1.56km_ZJ245_0402_4_A12',
+        'bev_gnd_fucai/20230224_20km/20230308_0.66km_ZJ251_0402_3_A12',
+        'bev_gnd_fucai/20230224_20km/20230306_2.44km_ZJ246_0319_6_A12',
+        'bev_gnd_fucai/20230224_20km/20230308_0.66km_ZJ251_0404_2_A12',
+        'bev_gnd_fucai/20230224_20km/20230306_2.44km_ZJ246_0327_1_A12',
+        'bev_gnd_fucai/20230224_20km/20230306_2.44km_ZJ246_0224_3',
+        'bev_gnd_fucai/20230224_20km/20230306_1.56km_ZJ245_0301_3',
+        'bev_gnd_fucai/20230224_20km/20230306_1.56km_ZJ245_0402_0_A12',
+        'bev_gnd_fucai/20230224_20km/20230306_1.56km_ZJ245_0404_1_A12',
+        'bev_gnd_fucai/20230224_20km/20230307_4.08km_ZJ247_part1_0224_4',
+        'bev_gnd_fucai/20230224_20km/20230306_1.56km_ZJ245_0402_6_A12',
+        'bev_gnd_fucai/20230224_20km/20230306_2.44km_ZJ246_0224_4',
+        'bev_gnd_fucai/20230224_20km/20230306_2.44km_ZJ246_0327_3_A12',
+        'bev_gnd_fucai/20230224_20km/20230306_1.56km_ZJ245_0413_2_A12',
+        'bev_gnd_fucai/20230224_20km/20230306_1.56km_ZJ245_0224_1',
+        'bev_gnd_fucai/20230224_20km/20230306_1.56km_ZJ245_0310_3_A12',
+        'bev_gnd_fucai/20230224_20km/20230306_2.44km_ZJ246_0327_2_A12',
+        'bev_gnd_fucai/20230224_20km/20230306_2.44km_ZJ246_0402_0_A12',
+        'bev_gnd_fucai/20230224_20km/20230309_4.40km_ZJ250_0331_1_A12',
+        'bev_gnd_fucai/20230224_20km/20230307_4.08km_ZJ247_part1_0319_5_A12',
+        'bev_gnd_fucai/20230224_20km/20230306_1.56km_ZJ245_0404_2_A12',
+        'bev_gnd_fucai/20230224_20km/20230307_4.08km_ZJ247_part1_0327_2_A12',
+        'bev_gnd_fucai/20230224_20km/20230307_4.08km_ZJ247_part1_0404_3_A12',
+        'bev_gnd_fucai/20230224_20km/20230306_1.56km_ZJ245_0224_4',
+        'bev_gnd_fucai/20230224_20km/20230308_0.66km_ZJ251_0402_1_A12',
+
+
+    ]
+
+    test_datasets = [
+        'bev_gnd_fucai/20221018_13km/20221020_5.78km_2022-10-24-12-29-12'
+        'bev_gnd_fucai/20230224_20km/20230306_1.56km_ZJ245_0301_5',
+        'bev_gnd_fucai/20230224_20km/20230308_4.45km_ZJ249_0319_5_A12',
+        'bev_gnd_fucai/20230224_20km/20230309_4.40km_ZJ250_0319_5_A12',
+        'bev_gnd_fucai/20230224_20km/20230308_0.66km_ZJ251_0402_4_A12',
+        'bev_gnd_fucai/20230224_20km/20230306_2.44km_ZJ246_0331_1_A12',
+        'bev_gnd_fucai/20230224_20km/20230307_4.41km_ZJ248_0402_1_A12',
+    ]
+
+
+
+    # train_datasets = ['20221020_5.78km_2022-11-29-13-55-40',
+    #                   "20221027_6.58km_2022-12-04-08-37-08",
+    #                   "20221027_6.58km_2022-12-04-09-08-14",
+    #                   "20221027_6.58km_2022-12-04-11-38-23_part2",
+    #                   "20230216_2.11km_ZJ227_0301_4",
+    #                   "20230306_1.56km_ZJ245"
+    #                   ]
+    # test_datasets = ['20221027_6.58km_2022-12-04-11-38-23_part1', ]
 
     print("argv:", sys.argv[1:])
     print_args(input_args)
@@ -298,6 +435,13 @@ if __name__ == "__main__":
         raise Exception("Invalid input folder: {}".format(input_args.input_folder))
     if not input_args.output_folder:
         input_args.output_folder = input_args.input_folder
+
+    if not os.path.exists(input_args.output_folder):
+        os.makedirs(input_args.output_folder)
+
+    out_pointcloud_path = os.path.join(input_args.output_folder, "pointcloud")
+    if not os.path.exists(out_pointcloud_path):
+        os.makedirs(out_pointcloud_path)
 
     torch.manual_seed(input_args.rand_seed)
     torch.cuda.manual_seed(input_args.rand_seed)
@@ -308,7 +452,7 @@ if __name__ == "__main__":
         num_views=input_args.num_views,
         max_dim=input_args.image_max_dim,
         scan_list=train_datasets,
-        camera_mask_path='/media/cjq/新加卷/datasets/220Dataset/GS4-2M.png'
+        camera_mask_path='GS4-2M.png'
     )
     test_dataset = MaxieyeMVSDataset(
         data_root=input_args.input_folder,
@@ -316,7 +460,7 @@ if __name__ == "__main__":
         num_views=input_args.num_views,
         max_dim=input_args.image_max_dim,
         scan_list=test_datasets,
-        camera_mask_path='/media/cjq/新加卷/datasets/220Dataset/GS4-2M.png'
+        camera_mask_path='GS4-2M.png'
     )
 
     train_loader = DataLoader(train_dataset, input_args.batch_size, shuffle=True, num_workers=8, drop_last=True)

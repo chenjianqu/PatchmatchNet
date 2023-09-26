@@ -28,11 +28,11 @@ def scale_to_max_dim(image: np.ndarray, max_dim: int) -> Tuple[np.ndarray, int, 
         width = int(scale * original_width)
         height = int(scale * original_height)
 
-        width = (width//8)*8  # 宽高须为8的倍数
-        height = (height//8)*8
+        width = (width // 8) * 8  # 宽高须为8的倍数
+        height = (height // 8) * 8
 
         image = cv2.resize(image, (width, height), interpolation=cv2.INTER_LINEAR)
-        if image.ndim == 2: # 如果ndim为2,说明是单通道图像
+        if image.ndim == 2:  # 如果ndim为2,说明是单通道图像
             image = np.expand_dims(image, axis=2)
 
     return image, original_height, original_width
@@ -343,3 +343,53 @@ def save_pfm(filename: str, image: np.ndarray, scale: float = 1) -> None:
 
     image.tofile(file)
     file.close()
+
+
+def read_binary_mask(mask_path: str, dilate_size: int = -1,
+                     img_size: Tuple[int, int] = (),
+                     maps: Tuple[np.ndarray, np.ndarray] = None,
+                     camera_mask: np.ndarray = None,
+                     ):
+    """
+    读取语义mask，并进行膨胀处理
+    Args:
+        camera_mask: (w,h),相机mask
+        maps: (un_map1,un_map2) 用于去畸变的映射矩阵
+        img_size: (w,h)要缩放到图像的大小
+        mask_path: mask图像的路径
+        dilate_size: 膨胀的半径
+
+    Returns: 二值语义图像 [H,W]
+    """
+
+    mask_img = cv2.imread(mask_path, -1)
+
+    if mask_img is None:
+        mask_img = np.ones((img_size[1], img_size[0]), dtype=bool)
+        return mask_img
+
+    assert mask_img.ndim == 2
+
+    if camera_mask is not None:
+        assert mask_img.shape[0] == camera_mask.shape[0]
+        assert mask_img.shape[1] == camera_mask.shape[1]
+        mask_img = mask_img.astype(bool)
+        mask_img = np.logical_and(mask_img, camera_mask)
+
+    mask_img = mask_img.astype(np.uint8)
+
+    # 去畸变
+    if maps is not None:
+        mask_img = cv2.remap(mask_img, maps[0], maps[1], cv2.INTER_NEAREST)
+
+    # 腐蚀
+    if dilate_size > 0:
+        kernel = np.ones((dilate_size, dilate_size), np.uint8)
+        mask_img = cv2.erode(mask_img, kernel, iterations=1)
+
+    # 缩放
+    if img_size:
+        mask_img = cv2.resize(mask_img, img_size, interpolation=cv2.INTER_NEAREST)
+        
+    mask_img = mask_img > 0
+    return mask_img
